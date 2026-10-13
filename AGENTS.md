@@ -1,9 +1,10 @@
 # Observability stack — read this first (written for AI agents)
 
 OpenObserve + Grafana + OpenTelemetry Collector in Docker Compose (this folder), node_exporter as a Homebrew service on the Mac.
-Not deployed yet, but built to be: all state is in a bucket + one Postgres server chosen by env (see "Storage"); no remote machine
-is monitored yet. The old Prometheus + Grafana stack on the GCP VM (`ssh GCP_aoeskills`, `~/monitoring`, its own AGENTS.md) is a
-reference only — see `docs/takeaways-from-grafana.md`. The owner writes Chinese (Traditional); answer in the language they use.
+Deployed since 2026-10-13: the observer runs in prod mode on the GCP VM (see "Deployment"); all state is in a bucket + one
+Postgres server chosen by env (see "Storage"). Monitored so far: this Mac (`local-mac`, agent only) with sclaser-food on it.
+The old Prometheus + Grafana stack that ran on that VM (`~/monitoring`) was removed the same day; its configs are archived on
+the Mac in `backups/gcp-monitoring-configs-20261013.tar.gz`, its takeaways in `docs/takeaways-from-grafana.md`. The owner writes Chinese (Traditional); answer in the language they use.
 
 ## Rules
 - **Generated content is not in the repo.** Dashboards and alert rules are built at runtime by the `provisioner` service
@@ -72,7 +73,9 @@ reference only — see `docs/takeaways-from-grafana.md`. The owner writes Chines
 - Queries merge both: `file_list` → parquet from the bucket, plus the WAL / memory for the newest data. Dashboards are real time;
   a query over the last hour returns the full hour (verified: one SQL over 13:42–14:23 had every minute, the last one only in the WAL).
 - The compactor merges small files and applies retention in the bucket — never add bucket lifecycle rules (`file_list` would point to deleted files).
-- Losing the container disk loses only the not-yet-uploaded WAL (≤ ~20 min). Losing Postgres orphans the bucket (data present, unlisted).
+- Losing the container disk loses only the not-yet-uploaded WAL (≤ ~20 min for a stream that keeps receiving data; a WAL file
+  older than 600 s is closed only when the next record for that type arrives — observed 2026-10-13: a sparse logs stream's file
+  opened 08:49 was closed 09:06 by the next log, uploaded 09:17. Queries are unaffected, they read the WAL). Losing Postgres orphans the bucket (data present, unlisted).
   Verified 2026-10-12: a fresh container with an empty disk, same bucket + DSN, served the old logs, metrics and dashboards.
 - One Postgres server, three databases (`db/init.sql`): `openobserve` (metadata: schemas, file list, users, dashboards),
   `grafana` (Grafana's own DB: users, alert state), `monitoring` (thresholds). Separate databases because OpenObserve and
@@ -80,7 +83,8 @@ reference only — see `docs/takeaways-from-grafana.md`. The owner writes Chines
   `PG_PASSWORD` goes into OpenObserve's DSN URL, so it must be URL-safe.
 - One S3 client for both modes (`ZO_S3_PROVIDER=s3`): RustFS locally, GCS through its S3 XML API with an HMAC key in prod
   (`ZO_S3_PROVIDER=gcs` would switch to the native GCS client, which ignores the endpoint, so it cannot be emulated locally).
-  The GCS path is not yet tested against a real bucket. OpenObserve never creates the bucket (local: `bucket-init`; prod: create it in GCP).
+  Verified on GCS 2026-10-13 (prod, bucket `aoeskills_bucket-1`, asia-northeast1): metrics, traces and logs uploaded as
+  parquet under `files/default/<type>/<stream>/YYYY/MM/DD/HH/`. OpenObserve never creates the bucket (local: `bucket-init`; prod: create it in GCP).
 - `ZO_EXT_AUTH_SALT` (16–48 bytes) is required on a new install since v1.1.0 (crash-loop with "db init failed" otherwise) and must stay
   the same for the lifetime of the Postgres DB.
 - MinIO is not used: its community edition stopped publishing images in 2025-10 and the repo is archived.
@@ -228,27 +232,37 @@ is gitignored) — migrations only go forward.
 - Dashboard variables of type `query_values` resolve asynchronously; panels show "no data" for a few seconds on first load.
 - `PUT /api/{org}/dashboards/{id}` needs `?folder=` and `&hash=` (the current hash from the list call); a dashboard's hash changes on every write.
 
-## Before the first VM deploy (open items, written 2026-10-13)
-Plan: observer on the GCP VM (`GCP_aoeskills`), first monitored subjects = this Mac and sclaser-food on it.
-Checked against the old stack's AGENTS.md (`~/monitoring` on that VM); decide these before deploying:
-- **Resources**: VM has 2 vCPU, 1.9 GB RAM (~770 MB free while the old stack runs), 9.7 GB disk with 2.6 GB free. Local mode
-  here uses ~1.1 GB RAM (OpenObserve ~290 MB, Grafana ~340 MB, RustFS ~240 MB, Postgres ~75 MB) and ~3 GB of images. The old
-  stack must stop first, prod mode (GCS + Cloud SQL) saves RustFS + Postgres, and OpenObserve's memory caches may need limits.
-  `db-init` could reuse the provisioner image (has psql) instead of postgres:17-alpine (415 MB).
-- **Port clashes with the old stack** (host network there): Grafana 13000, node-exporter 9100, Postgres 5432.
-- **Gateway port 4317 must be open to the Mac** — the old hard rule was "do not change the GCP firewall / open ports"; the
-  agent design (owner, 2026-10-13) needs it: the owner opens it (or uses Tailscale, already running on the VM). Gateway cert:
-  `scripts/pki.sh gateway <VM IP / tailnet name> ...`; the Mac agent then gets `GATEWAY_ENDPOINT=<that>:4317`.
-- **Storage on the VM**: prod mode needs a GCS bucket + HMAC key and a Postgres (Cloud SQL) — not created yet, GCS path never
-  tested — or run local mode on the VM as a first test (disk!).
-- **Access**: as on the old stack, Caddy on 127.0.0.1:80 by path (`/grafana/`, `/openobserve/`); tunnel
-  `ssh -N -L 8080:127.0.0.1:80 GCP_aoeskills`, or Tailscale (`tailscale serve` on the VM forwards tailnet :80 to 127.0.0.1:80).
-  Old Caddy also binds 80 there: stop the old stack first.
-- **host.name from GCP**: check on the VM that the agent detects the instance name (`aoeskills-first-host`; leave HOST_NAME unset).
-- Old stack also scraped the sclaser VM at `34.104.203.72:9100` (node_exporter reachable from outside); when that VM gets an
-  agent, close 9100 there.
-- Not verified yet: LINE delivery with real credentials (`.env` empty), GCS / Cloud SQL, the agent's node-exporter on a real
-  Linux VM, retention actually deleting expired files.
+## Deployment (GCP VM, since 2026-10-13)
+- **Observer**: `ssh GCP_aoeskills` = `aoeskills-first-host` (project `united-rope-297316`, zone asia-northeast1-b, external IP
+  `34.146.61.17`, 2 vCPU / 1.9 GB RAM / 9.7 GB disk), repo in `~/observability`, `docker compose -f docker-compose.prod.yml`.
+  Storage: GCS bucket `aoeskills_bucket-1` (S3 XML API + HMAC key), Cloud SQL Postgres on a private IP, user `obs_app` (db-init
+  created the three databases itself). Uses ~1.4 GB RAM (OpenObserve ~310 MB, Grafana ~345 MB, collector ~75 MB), ~2.4 GB disk free.
+- **Repo on the VM**: read-only GitHub deploy key `~/.ssh/observability_deploy` (`git config core.sshCommand` in the repo), so
+  `git pull` works there without agent forwarding. Changes go Mac → push → `git pull` on the VM.
+- **Gateway**: GCP firewall rule `allow-otel-gateway` = tcp:4317 from 0.0.0.0/0 to network tag `otel-gateway` (owner: the Mac's IP
+  changes, the client certificate is the key); `.env` `OTEL_GATEWAY_BIND=0.0.0.0`; certificate SAN `34.146.61.17`, key created on
+  the VM (CSR signed with the CA on the Mac), owned by uid 10001.
+- **CA**: only on the Mac (`pki/ca.key`). The owner asks the agent (Claude) to sign certificates for new machines; preferred:
+  key + CSR on the machine, sign on the Mac, copy back only certificates (keys never travel).
+- **Access**: `ssh -N -L 8080:127.0.0.1:80 GCP_aoeskills` → http://localhost:8080/grafana/, or Tailscale
+  http://aoeskills-first-host.tail8656d8.ts.net/grafana/ (`tailscale serve` forwards tailnet :80 to 127.0.0.1:80). Both verified.
+- **Passwords** (found while deploying): Cloud SQL requires lower + upper + digit + special, and `PG_PASSWORD` goes into a URL
+  (OpenObserve: `InvalidPort` otherwise) → use only `-._~` as specials, e.g. `printf 'Aa1-%s' "$(openssl rand -hex 20)"`. The same
+  form satisfies OpenObserve's root password rule (crash-loop "ZO_ROOT_USER_PASSWORD is too weak" otherwise). No `$` in `.env`.
+- **LINE**: real delivery verified 2026-10-13. A 401 in Grafana's log ("Notify for alerts failed ... 401") = invalid channel token;
+  check a token without sending: `GET https://api.line.me/v2/bot/info` with `Authorization: Bearer <token>` (200 = valid). Test a
+  contact point on Grafana 13: `POST /grafana/apis/notifications.alerting.grafana.app/v1beta1/namespaces/default/receivers/<base64url(name)>/test`
+  with `{"integration": <the receiver's stored integration>, "alert": {...}}` (the old `/api/alertmanager/.../receivers/test` → 410).
+- **This Mac as a monitored machine**: the local observer is stopped (`docker compose -f docker-compose.local.yml down`, data kept);
+  the agent runs alone: `cd agent && docker compose -f docker-compose.yml -f docker-compose.mac.yml up -d` (`agent/.env`:
+  `HOST_NAME=local-mac`, `SERVICE_NAMESPACE=sclaser_food`, `GATEWAY_ENDPOINT=34.146.61.17:4317`; probes in
+  `agent/probes/sclaser-food.yml`). sclaser-food runs in prod mode on the Mac (`npm run build && npm run start:daemon`, `.env.local`).
+- Verified 2026-10-13 end to end: Mac metrics / traces / logs / service probe → gateway → OpenObserve → GCS; Fleet Overview cards;
+  Service DOWN pending after stopping sclaser-food, back to normal after restart; Machine DOWN briefly pending once when the
+  agent's gRPC connection dropped (EOF, reconnected after 5 s) — watch for repeats (keepalive).
+- Still open: the agent on a real Linux VM (node-exporter profile, GCP host.name detection — the VM itself runs no agent yet);
+  the sclaser VM (`34.104.203.72`) still exposes node_exporter :9100 from the old stack — close it when it gets an agent;
+  retention actually deleting expired files.
 
 ## Web access (Caddy)
 `caddy/Caddyfile`: 127.0.0.1:80, `/grafana*` → grafana:3000, `/openobserve*` → openobserve:5080, else 404; paths forwarded
@@ -264,7 +278,7 @@ dashboards are relative: `../openobserve/...` (`o2_links.py`; Grafana rewrites `
   Prod observer: `docker compose -f docker-compose.prod.yml up -d` / `down`. Needs Docker Compose ≥ 2.20 (`include`).
   Why no wrapper script: `include` with `env_file` gives each mode its storage settings, and an including file may extend an
   included service (local adds `depends_on` on its bucket / postgres). Verified 2026-10-13: up, data kept, down removes all.
-- Remote machines run only `agent/` (`docker compose up -d` there).
+- Remote machines run only `agent/` (`docker compose up -d` there); this Mac too since the deploy (see "Deployment").
 - Change collector config → `docker compose -f docker-compose.local.yml restart otel-collector`. Change an env file → `docker compose -f docker-compose.local.yml up -d` (recreate).
 - Query from a shell: PromQL `GET /openobserve/api/default/prometheus/api/v1/query?query=...`; SQL `POST /openobserve/api/default/_search?type=logs|traces|metrics`
   with `{"query":{"sql":..., "start_time":µs, "end_time":µs}}`. Basic auth with the `.env` credentials.
