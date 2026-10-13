@@ -3,7 +3,7 @@
 #
 #   scripts/pki.sh init                       CA, once (pki/ca.key, pki/ca.crt, 10 years). Keep ca.key private.
 #   scripts/pki.sh gateway <ip|name> ...      the gateway's server certificate; list every IP / DNS name agents dial
-#                                             (local: host.docker.internal; remote: the observer's public IP)
+#                                             (local: host.docker.internal; remote: the collector's public IP)
 #   scripts/pki.sh client <machine>           one client certificate per machine (CN = machine name, 2 years)
 #                                             -> pki/clients/<machine>/{ca.crt,client.crt,client.key}: copy that
 #                                             directory to the machine's agent/certs

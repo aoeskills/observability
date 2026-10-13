@@ -1,6 +1,6 @@
 # Local mode, everything on this Mac in one project:
 #   docker compose -f docker-compose.local.yml up -d        docker compose -f docker-compose.local.yml down
-#   - the observer (docker-compose.yml) with storage settings from .local.env
+#   - the collector (docker-compose.yml) with storage settings from .local.env
 #   - its bucket (RustFS) and Postgres as containers (docker-compose.local-storage.yml), so no network is needed
 #   - this Mac's own agent (agent/, settings in agent/.env): the Mac is also a monitored machine
 # Shared secrets (OpenObserve root, Grafana admin, LINE) come from .env, which must not hold storage settings: a value in

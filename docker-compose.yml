@@ -1,4 +1,4 @@
-# Observability stack, the observer. Not started on its own: docker-compose.local.yml / docker-compose.prod.yml include it
+# Observability stack, the collector role (README "角色與用詞"). Not started on its own: docker-compose.local.yml / docker-compose.prod.yml include it
 # with the storage settings (O2_S3_*, PG_*, O2_EXT_AUTH_SALT) from .local.env / .prod.env.
 #   - OpenObserve stores everything (metrics, logs, traces): data in an S3-API bucket, metadata in Postgres.
 #   - Apps send OTLP traces/logs to the collector (127.0.0.1:4317 gRPC / 127.0.0.1:4318 HTTP); the collector also
@@ -84,7 +84,7 @@ services:
       O2_ORG: ${O2_ORG:-default}
     ports:
       # Gateway for every machine's agent: OTLP gRPC + mTLS (client certificate from scripts/pki.sh required).
-      # Local: 127.0.0.1. On the observer host set OTEL_GATEWAY_BIND=0.0.0.0 (open to any IP; the certificate is the key).
+      # Local: 127.0.0.1. On the collector set OTEL_GATEWAY_BIND=0.0.0.0 (open to any IP; the certificate is the key).
       - ${OTEL_GATEWAY_BIND:-127.0.0.1}:4317:4317
     volumes:
       - ./otel-collector/config.yaml:/etc/otelcol/config.yaml:ro
@@ -164,7 +164,7 @@ services:
 
   caddy:
     # The one web entry point: /grafana -> Grafana, /openobserve -> OpenObserve (caddy/Caddyfile). Listens on 127.0.0.1:80 only;
-    # on the observer host reach it through an SSH tunnel (`ssh -N -L 8080:127.0.0.1:80 <host>`) or Tailscale.
+    # on the collector reach it through an SSH tunnel (`ssh -N -L 8080:127.0.0.1:80 <host>`) or Tailscale.
     image: caddy:latest
     container_name: caddy
     restart: unless-stopped

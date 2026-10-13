@@ -1,62 +1,52 @@
-# Agent runbook：在新的 VM 上加入監控
+# Agent runbook：加一台 agent（被收集端）
 
-一台 VM 上只跑一個 agent（`agent/`）。它收集這台機器的狀態（node_exporter）、這台機器上服務的 HTTP 探測結果（blackbox-exporter）和 app 的 traces / logs，用 mTLS 推到 observer 的 gateway（`:4317`）。**observer 不用做任何修改**，新機器的卡片、告警、OpenObserve stream 都會自動出現。架構見 [architecture.md](architecture.md)。
+**agent** 是被監控的機器（角色定義見 [README 的「角色與用詞」](../README.md#角色與用詞)）。每台 agent 只跑 `agent/`：`otel-agent` 收集這台機器的狀態（node_exporter）、這台機器上服務的 HTTP 探測結果（blackbox-exporter）和 app 的 traces / logs，用 mTLS 推到 collector 的 gateway（`:4317`）。**collector 不用做任何修改**，新 agent 的卡片、告警、OpenObserve stream 都會自動出現。架構見 [architecture.md](architecture.md)；collector 那一端見 [collector-runbook.md](collector-runbook.md)。
+
+下面的 `<agent>` 是新 agent 的 ssh 名稱，指令裡的「這台 Mac」是放 CA 的那台（repo 根目錄、`pki/`）。
 
 名詞：
-- **機器名稱**：這台機器在所有資料裡的名字，也就是 OpenTelemetry 的 `host.name`，**由 agent 自動偵測**，每分鐘重新偵測一次：GCP 上是 VM 的名稱，其他環境是作業系統的 hostname。它會出現在 Fleet Overview 的卡片、metrics 的 `instance` / `host_name`、traces / logs 的 `host.name`，也是門檻和機器清單的 key。只有偵測不到好名字的機器（例如這台 Mac）才在 `agent/.env` 設 `HOST_NAME` 覆蓋。憑證的名稱和它無關。
-- **project**（`SERVICE_NAMESPACE`）：這台機器屬於哪個專案，也就是 OpenTelemetry 的 `service.namespace`，例如 `sclaser_food`。沒有自己設 namespace 的 app 會用這個值，它也決定資料進 OpenObserve 的哪個 stream。
+- **機器名稱**：這台 agent 在所有資料裡的名字，也就是 OpenTelemetry 的 `host.name`，**由 otel-agent 自動偵測**，每分鐘重新偵測一次：GCP 上是 VM 的名稱，其他環境是作業系統的 hostname。它會出現在 Fleet Overview 的卡片、metrics 的 `instance` / `host_name`、traces / logs 的 `host.name`，也是門檻和機器清單的 key。只有偵測不到好名字的機器（例如這台 Mac）才在 `agent/.env` 設 `HOST_NAME` 覆蓋。憑證的名稱和它無關。
+- **project**（`SERVICE_NAMESPACE`）：這台 agent 屬於哪個專案，也就是 OpenTelemetry 的 `service.namespace`，例如 `sclaser_food`。沒有自己設 namespace 的 app 會用這個值，它也決定資料進 OpenObserve 的哪個 stream。
 
 ## 0. 前提
 
 | 在哪裡 | 需要 |
 |---|---|
-| 新 VM | Linux、Docker + Docker Compose；能**連出去**到 observer 的 4317（不需要開任何對內的 port） |
-| observer | gateway 對外開放：`.env` 設 `OTEL_GATEWAY_BIND=0.0.0.0`，雲端防火牆允許 4317 進來；gateway 憑證的 SAN 包含 agent 要連的 IP 或名稱；Linux 上私鑰要給 collector 的使用者：`sudo chown 10001:10001 pki/gateway/gateway.key`（權限維持 600） |
-| 你的電腦 | 這個 repo 和 `pki/`（CA 私鑰只在這裡，不進 git） |
+| 新 agent | Linux、Docker + Docker Compose；能**連出去**到 collector 的 4317（不需要開任何對內的 port） |
+| collector | 已照 [collector-runbook.md](collector-runbook.md) 架好：gateway 對外開放、防火牆允許 4317、gateway 憑證的 SAN 包含 agent 要連的 IP 或名稱（目前 `34.146.61.17`） |
+| 這台 Mac | 這個 repo 和 `pki/`（CA 私鑰只在這裡，不進 git）。憑證由 Claude 在這台 Mac 上簽 |
 
-## 1. 簽這台機器的憑證（在你的電腦）
+## 1. 憑證：在新 agent 上產生私鑰，在這台 Mac 上簽
+
+私鑰在新 agent 上產生、不離開那台機器；這台 Mac 只簽 CSR，送回去的只有憑證。
+
+在新 agent 上（`<機器名稱>` 只是憑證上的名字，和偵測到的機器名稱無關）：
 
 ```bash
-scripts/pki.sh client <機器名稱>
+ssh <agent> 'mkdir -p ~/agent/certs ~/agent/probes && cd ~/agent/certs && openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout client.key -out client.csr -subj "/CN=<機器名稱>" && chmod 600 client.key'
 ```
 
-產出在 `pki/clients/<機器名稱>/`：`ca.crt`、`client.crt`、`client.key`。
-
-如果 observer 的 IP 或名稱是新的（gateway 憑證裡沒有），要重簽 gateway 憑證，**列出所有** agent 會連的名稱，然後重啟 gateway：
+在這台 Mac 上（repo 根目錄）把 CSR 拿回來、用 CA 簽（有效 2 年）、把憑證和 CA 憑證送回去，刪掉 CSR：
 
 ```bash
-scripts/pki.sh gateway <observer IP> host.docker.internal localhost 127.0.0.1
+scp <agent>:agent/certs/client.csr "$TMPDIR/client.csr" && printf 'extendedKeyUsage=clientAuth\nkeyUsage=digitalSignature\n' > "$TMPDIR/client.ext" && openssl x509 -req -in "$TMPDIR/client.csr" -CA pki/ca.crt -CAkey pki/ca.key -CAcreateserial -days 730 -sha256 -extfile "$TMPDIR/client.ext" -out "$TMPDIR/client.crt" && openssl verify -CAfile pki/ca.crt "$TMPDIR/client.crt" && scp "$TMPDIR/client.crt" pki/ca.crt <agent>:agent/certs/ && ssh <agent> 'rm ~/agent/certs/client.csr'
 ```
 
-```bash
-docker compose -f docker-compose.prod.yml restart otel-collector
-```
+`~/agent/certs/` 最後有 `ca.crt`、`client.crt`、`client.key` 三個檔案。otel-agent 在容器裡以 root 執行，所以私鑰維持 600 即可。
 
-## 2. 把 agent 和憑證放到 VM 上
+## 2. 把 agent 的檔案放到新 agent 上
 
-只需要 `agent/` 裡的四個檔案、探測範例和憑證：
+只需要 `agent/` 裡的四個檔案和探測範例：
 
 ```bash
-ssh <vm> 'mkdir -p ~/agent/certs ~/agent/probes'
-```
-
-```bash
-scp agent/docker-compose.yml agent/config.yaml agent/blackbox.yml agent/.env.example <vm>:~/agent/
+scp agent/docker-compose.yml agent/config.yaml agent/blackbox.yml agent/.env.example <agent>:~/agent/
 ```
 
 ```bash
-scp agent/probes/example.yml.sample <vm>:~/agent/probes/
+scp agent/probes/example.yml.sample <agent>:~/agent/probes/
 ```
 
-```bash
-scp pki/clients/<機器名稱>/* <vm>:~/agent/certs/
-```
-
-```bash
-ssh <vm> 'chmod 600 ~/agent/certs/client.key'
-```
-
-## 3. 設定 `agent/.env`（在 VM 上）
+## 3. 設定 `agent/.env`（在新 agent 上）
 
 ```bash
 cd ~/agent && cp .env.example .env
@@ -66,9 +56,9 @@ cd ~/agent && cp .env.example .env
 |---|---|
 | `HOST_NAME` | **通常不用設**：GCP 上會自動用 VM 名稱。只有自動偵測的名字不能用時才設（例如這台 Mac） |
 | `SERVICE_NAMESPACE` | 這台機器屬於的 project，例如 `sclaser_food` |
-| `GATEWAY_ENDPOINT` | `<observer IP 或名稱>:4317`，必須是 gateway 憑證 SAN 裡的其中一個 |
-| `COMPOSE_PROFILES=node-exporter` | 保留：由這份 compose 一起跑 node_exporter。VM 上**已經有** node_exporter 的話刪掉這行，並設 `NODE_EXPORTER_TARGET=<它的位址>`（預設 `127.0.0.1:9100`） |
-| `AGENT_OTLP_BIND` | app 送 traces / logs 的位址，**見第 5 步**：app 直接跑在 VM 上不用設；app 跑在 Docker（例如 sclaser-food）設 `172.17.0.1:4318` |
+| `GATEWAY_ENDPOINT` | `<collector IP 或名稱>:4317`（目前 `34.146.61.17:4317`），必須是 gateway 憑證 SAN 裡的其中一個 |
+| `COMPOSE_PROFILES=node-exporter` | 保留：由這份 compose 一起跑 node_exporter。這台 agent 上**已經有** node_exporter 的話刪掉這行，並設 `NODE_EXPORTER_TARGET=<它的位址>`（預設 `127.0.0.1:9100`） |
+| `AGENT_OTLP_BIND` | app 送 traces / logs 的位址，**見第 5 步**：app 直接跑在這台 agent 上（不在 Docker 裡）不用設；app 跑在 Docker（例如 sclaser-food）設 `172.17.0.1:4318` |
 
 ### 服務探測（`agent/probes/*.yml`）
 
@@ -87,7 +77,7 @@ cd ~/agent && cp .env.example .env
 cd ~/agent && docker compose up -d
 ```
 
-會起 `otel-agent`、`blackbox-exporter`（服務探測，只聽 127.0.0.1:9115），加上 `node-exporter`（如果 `COMPOSE_PROFILES` 有設）。兩者都是 `restart: unless-stopped`，VM 重開機後會自己起來。
+會起 `otel-agent`、`blackbox-exporter`（服務探測，只聽 127.0.0.1:9115），加上 `node-exporter`（如果 `COMPOSE_PROFILES` 有設）。都是 `restart: unless-stopped`，機器重開機後會自己起來。
 
 ## 5. 讓 API server 把 traces / logs 送進 agent
 
@@ -98,15 +88,15 @@ agent 不會去 app 那邊抓資料，是 app 的 OpenTelemetry SDK 主動送到
 
 `host.name` 不用在 app 設，agent 會統一換成偵測到的機器名稱。
 
-### 情況 A：app 直接跑在 VM 上（不在 Docker 裡）
+### 情況 A：app 直接跑在 agent 主機上（不在 Docker 裡）
 
 不用額外設定：agent 預設聽 `127.0.0.1:4318`，也就是 SDK 預設送往的 `http://localhost:4318`。
 
 ### 情況 B：app 跑在 Docker 容器裡（例如 sclaser-food）
 
-容器裡的 `localhost` 是容器自己，連不到 VM 上的 agent，所以要做兩件事：
+容器裡的 `localhost` 是容器自己，連不到主機上的 otel-agent，所以要做兩件事：
 
-1. **agent 改聽 docker0 的位址**：在 VM 上查 docker0 的 IP，通常是 `172.17.0.1`：
+1. **otel-agent 改聽 docker0 的位址**：在這台 agent 上查 docker0 的 IP，通常是 `172.17.0.1`：
 
    ```bash
    ip -4 addr show docker0
@@ -125,7 +115,7 @@ agent 不會去 app 那邊抓資料，是 app 的 OpenTelemetry SDK 主動送到
 
    在 Linux 上，`host-gateway` 會解析成 docker0 的 IP，正好是 agent 聽的位址。**sclaser-food 的 `docker-compose.yml` 已經這樣設好了**，只要做第 1 點即可。
 
-注意：設成 docker0 位址後，VM 上**不在** Docker 裡的程式要改送 `http://172.17.0.1:4318`，`localhost:4318` 就不通了。
+注意：設成 docker0 位址後，這台 agent 上**不在** Docker 裡的程式要改送 `http://172.17.0.1:4318`，`localhost:4318` 就不通了。
 
 **從 app 容器裡直接測試**（Node.js app，例如 sclaser-food；回應 `200` 就是通了）：
 
@@ -143,7 +133,7 @@ docker exec <app 容器名稱> getent hosts host.docker.internal
 
 ## 6. 確認
 
-在 VM 上看 agent 最近的 log，不能有 `failed to connect`、`certificate` 之類的錯誤：
+在新 agent 上看 otel-agent 最近的 log，不能有 `failed to connect`、`certificate` 之類的錯誤：
 
 ```bash
 docker compose logs --tail 30 otel-agent
@@ -161,7 +151,7 @@ curl -s 127.0.0.1:9100/metrics | head -3
 curl -s '127.0.0.1:9115/probe?module=http_200&target=http://127.0.0.1:3000/login' | grep -E '^probe_(success|http_status_code) '
 ```
 
-在 observer：
+在 collector（Grafana / OpenObserve 網頁）：
 - Grafana **Fleet Overview** 約 1 分鐘內出現這台機器的卡片，名稱就是偵測到的機器名稱（GCP 上是 VM 名稱），套用預設門檻；
 - 有設服務探測的話，**Services** 出現該服務的卡片（`instance` = 這台機器，`target` = 探測的 URL）；
 - app 有流量後，OpenObserve **Traces** 選 stream `<SERVICE_NAMESPACE>`，可以看到 `service_host_name = <機器名稱>` 的 trace；第一次看到新的 project 時，它的 stream 和儀表板會自動建立；
@@ -172,7 +162,8 @@ curl -s '127.0.0.1:9115/probe?module=http_200&target=http://127.0.0.1:3000/login
 | 症狀 | 原因與處理 |
 |---|---|
 | agent log：`x509: certificate is valid for ..., not ...` | `GATEWAY_ENDPOINT` 不在 gateway 憑證的 SAN 裡 → 第 1 步重簽 gateway 憑證，或改用 SAN 裡的名稱 |
-| agent log：`connection refused` / timeout | observer 沒開放 4317（`OTEL_GATEWAY_BIND=0.0.0.0`、雲端防火牆），或 IP 打錯 |
+| agent log：`connection refused` / timeout | collector 沒開放 4317（`OTEL_GATEWAY_BIND=0.0.0.0`、雲端防火牆），或 IP 打錯 |
+| agent log：`context deadline exceeded` / `Unavailable`，但 4317 連得上 | collector 那邊 OpenObserve 沒起來，gateway 寫不進去 → 見 collector runbook 的疑難排解 |
 | agent log：`certificate required` / `bad certificate` | `agent/certs` 少檔案，或憑證不是這個 CA 簽的（CA 重建過 → 重簽所有機器） |
 | 卡片沒出現，但 agent 沒有錯誤 | node_exporter 沒在跑或位址不對 → 檢查 `curl 127.0.0.1:9100/metrics`、`COMPOSE_PROFILES` / `NODE_EXPORTER_TARGET` |
 | Services 沒有卡片 / 一直 DOWN | `probes/*.yml` 的 URL 在這台機器上連不到或不是 200 → 用第 6 步的 curl 測；檔名要是 `.yml`；YAML 格式錯誤時 agent log 會有 `file_sd` 的錯誤 |
@@ -189,5 +180,5 @@ curl -s '127.0.0.1:9115/probe?module=http_200&target=http://127.0.0.1:3000/login
 | 移除機器 | `docker compose down`（磁碟佇列保留；加 `-v` 連佇列一起刪），然後在 Fleet Overview 它的紅色 DOWN 卡片上按 **Retire**（從機器清單刪除、刪掉它自己的門檻，卡片和告警約 1 分鐘內消失）。沒按 Retire 就會一直顯示 DOWN 並告警：這就是「機器掛了」的偵測方式 |
 | 暫時停機維護 | 停機期間會顯示 DOWN 並告警，恢復後自動回到 UP。不要按 Retire（按了也沒關係，機器再送資料時會自動重新登記，只是門檻回到預設） |
 | 更新 agent 設定 | 從 repo 重新複製 `config.yaml` / `docker-compose.yml` / `blackbox.yml`，執行 `docker compose up -d` |
-| 憑證到期（client 2 年） | 第 1、2 步重做，執行 `docker compose restart otel-agent` |
-| 撤銷一台機器 | collector 沒有撤銷清單：重建 CA（`scripts/pki.sh init`）、重簽 gateway 和所有保留的機器（見 `scripts/pki.sh` 開頭說明） |
+| 憑證到期（client 2 年） | 第 1 步重做（新私鑰 + CSR，這台 Mac 簽），執行 `docker compose restart otel-agent` |
+| 撤銷一台 agent | gateway 沒有撤銷清單：在這台 Mac 重建 CA（`scripts/pki.sh init`，先移走舊的 `pki/`），重簽 gateway 憑證（[collector-runbook.md](collector-runbook.md) 第 3 步）和每台保留的 agent（第 1 步），所有 agent 換上新的 `ca.crt` |

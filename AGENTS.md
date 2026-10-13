@@ -1,10 +1,18 @@
 # Observability stack — read this first (written for AI agents)
 
 OpenObserve + Grafana + OpenTelemetry Collector in Docker Compose (this folder), node_exporter as a Homebrew service on the Mac.
-Deployed since 2026-10-13: the observer runs in prod mode on the GCP VM (see "Deployment"); all state is in a bucket + one
-Postgres server chosen by env (see "Storage"). Monitored so far: this Mac (`local-mac`, agent only) with sclaser-food on it.
+Deployed since 2026-10-13: the collector runs in prod mode on the GCP VM (see "Deployment"); all state is in a bucket + one
+Postgres server chosen by env (see "Storage"). Agents so far: this Mac (`local-mac`) with sclaser-food on it.
 The old Prometheus + Grafana stack that ran on that VM (`~/monitoring`) was removed the same day; its configs are archived on
-the Mac in `backups/gcp-monitoring-configs-20261013.tar.gz`, its takeaways in `docs/takeaways-from-grafana.md`. The owner writes Chinese (Traditional); answer in the language they use.
+the Mac in `backups/gcp-monitoring-configs-20261013.tar.gz`; its alert / threshold / Fleet Overview design lives on in
+`provisioner/grafana/`. The owner writes Chinese (Traditional); answer in the language they use.
+
+**Terms (owner, 2026-10-13; README "角色與用詞")**: hosts have two roles. **collector** = the one host running the whole stack
+(`docker-compose.prod.yml`: gateway, OpenObserve, Grafana, ...); **agent** = a monitored host running only `agent/`. Data flows
+agent → collector only. `otel-collector` / `otel-agent` are the containers; **gateway** = the collector's `otel-collector`
+service. One machine can be both (local mode). Use these words for roles in code comments and docs, never "observer", and
+"VM" / "Mac" only for a specific machine. Owner-facing runbooks: `docs/collector-runbook.md`, `docs/agent-runbook.md`;
+`docs/architecture.md` shows only services, connections and protocols (workflows belong in the runbooks).
 
 ## Rules
 - **Generated content is not in the repo.** Dashboards and alert rules are built at runtime by the `provisioner` service
@@ -24,23 +32,25 @@ the Mac in `backups/gcp-monitoring-configs-20261013.tar.gz`, its takeaways in `d
 ## Layout
 | path | what |
 |---|---|
-| `docker-compose.yml` | the observer's services; never started alone. Bucket + Postgres settings from env (`O2_S3_*`, `PG_*`, `O2_EXT_AUTH_SALT`), refuses to start if one is missing |
-| `docker-compose.local.yml` | local mode, one project: includes `docker-compose.yml` + `docker-compose.local-storage.yml` (env `.local.env`) and this Mac's agent (`agent/`, env `agent/.env`) |
+| `docker-compose.yml` | the collector's services; never started alone. Bucket + Postgres settings from env (`O2_S3_*`, `PG_*`, `O2_EXT_AUTH_SALT`), refuses to start if one is missing |
+| `docker-compose.local.yml` | local mode, one project: includes `docker-compose.yml` + `docker-compose.local-storage.yml` (env `.local.env`) and this Mac's agent services (`agent/`, env `agent/.env`): one machine as both roles |
 | `docker-compose.local-storage.yml` | local only: bucket (RustFS, console 127.0.0.1:9001), bucket-init (creates the bucket), postgres |
-| `docker-compose.prod.yml` | prod mode (observer host): includes `docker-compose.yml` with env `.prod.env` (copy `.prod.env.example`, gitignored) |
+| `docker-compose.prod.yml` | prod mode (the collector): includes `docker-compose.yml` with env `.prod.env` (copy `.prod.env.example`, gitignored) |
 | `.env` / `.local.env` / `.prod.env` | shared secrets (root, Grafana, LINE) / local storage settings (dev-only, committed) / prod storage settings |
 | `db/init.sql` | run by `db-init` on every start: creates databases `openobserve`, `grafana`, `monitoring` and table `usage_threshold` if missing |
 | `otel-collector/config.yaml` | the gateway: OTLP gRPC + mTLS from agents → OpenObserve stream `ingest` (pipelines move it to one stream per `service.namespace`); scrapes postgres-exporter (thresholds, machine inventory) → Prometheus remote write → OpenObserve |
 | `retention.json` | days OpenObserve keeps each project's traces / logs (`sclaser_food`: 90); unlisted projects use `O2_RETENTION_DAYS` |
-| `agent/` | the per-machine agent (compose + config + `.env.example`; `docker-compose.mac.yml` for this Mac): apps' OTLP + local node_exporter + service probes (`blackbox.yml`, targets `probes/*.yml`) → gateway |
+| `agent/` | everything an agent runs (compose + config + `.env.example`; `docker-compose.mac.yml` for this Mac): apps' OTLP + local node_exporter + service probes (`blackbox.yml`, targets `probes/*.yml`) → gateway |
 | `scripts/pki.sh` | private CA, gateway certificate, one client certificate per machine → `pki/` (gitignored) |
 | `provisioner/provision.py` | the runtime loop (every `DASHBOARD_SYNC_INTERVAL` s); stdlib only |
 | `provisioner/openobserve_dashboards.py` | OpenObserve "API Service" dashboard for one stream (SQL over traces / logs) |
 | `provisioner/grafana/` | Grafana generators ported from the GCP stack (`gen_fleet_overview.py`, `gen_node_details.py` + stock `node-exporter-full-1860.json`, `gen_alerts.py`), `o2_links.py` |
 | `grafana/provisioning/` | the static part of Grafana's provisioning (datasources, dashboard provider); the provisioner copies it next to the generated files |
 | `postgres-exporter/queries.yaml` | thresholds + machine inventory → metrics |
-| `node-exporter/` | flags for this Mac's brew service (`scripts/setup-node-exporter-macos.sh`); Linux VMs run node_exporter from `agent/` |
-| `docs/agent-runbook.md` | adding a new VM (certificate, `agent/.env`, apps, checks, troubleshooting, rename / remove) |
+| `node-exporter/` | flags for this Mac's brew service (`scripts/setup-node-exporter-macos.sh`); Linux agents run node_exporter from `agent/` |
+| `docs/collector-runbook.md` | the collector (zh): setup (env + password rules, gateway cert via CSR, firewall, deploy key), update, restart cost, backup, troubleshooting |
+| `docs/agent-runbook.md` | adding an agent (zh): certificate via CSR, `agent/.env`, probes, apps, checks, troubleshooting, rename / retire |
+| `docs/architecture.md` | services, connections, protocols and auth only (mermaid + table) |
 | `tools/fake_line_server.py` | stand-in for the LINE push API, for alert tests |
 
 ## Data model (what queries can rely on)
@@ -104,7 +114,7 @@ One name end to end: OpenTelemetry's resource attribute **`service.namespace`** 
   provisioner) send each record to stream `{service_service_namespace}` / `{service_namespace}` (dynamic destination name).
   `ingest` itself stays empty (the pipelines have no destination back to it).
 - A record whose namespace field is missing is **dropped** by the pipeline ("Field name ... not found in record") — that is why the
-  gateway always sets one. A new project therefore needs nothing on the observer: send data, the stream, its dashboard,
+  gateway always sets one. A new project therefore needs nothing on the collector: send data, the stream, its dashboard,
   the Grafana links appear; add a line to `retention.json` if it should not keep the default 30 days.
 - Retention: per stream `data_retention` (0 = `O2_RETENTION_DAYS`), set by the provisioner from `retention.json`; OpenObserve's
   compactor deletes expired files from the bucket (never bucket lifecycle rules). Setting it is verified; actual deletion
@@ -126,7 +136,10 @@ One name end to end: OpenTelemetry's resource attribute **`service.namespace`** 
 
 ## Grafana: machines, services, thresholds, alerts
 Split decided by the owner (2026-10-12): Grafana for machine/service status, thresholds and LINE alerts (the GCP design, ported);
-OpenObserve for storage and logs/traces. Grafana has **no Prometheus of its own**: its datasource `openobserve` is
+OpenObserve for storage and logs/traces. Why not all in OpenObserve (tried 2026-10-12): its HTML panels are sanitized and
+custom-chart JS is sandboxed (no `fetch`), so no ✎ threshold editing on cards; enrichment tables are whole-file CSV uploads,
+alerts cannot read them and gauges cannot draw them; its alerts stop evaluating while silenced and have no Alertmanager-style
+routes that re-send the current state, so no digest. Grafana has **no Prometheus of its own**: its datasource `openobserve` is
 OpenObserve's Prometheus-compatible API (`/api/default/prometheus`, basic auth from `.env`).
 - Generators in `provisioner/grafana/` are the GCP ones with these changes: `round(x, 0.1)` → `round(x * 10) / 10` (OpenObserve
   rejects the 2-arg form), macOS memory branch (`or (active + wired + compressed) / total`), Grafana served at `/grafana` behind Caddy as on GCP
@@ -167,20 +180,22 @@ OpenObserve's Prometheus-compatible API (`/api/default/prometheus`, basic auth f
 
 ## Agent + gateway (mTLS)
 Owner's decision (2026-10-13): every machine pushes everything (node_exporter metrics, apps' traces and logs) through one agent;
-the observer exposes one entry point and needs no change when a machine is added. OpenTelemetry's agent + gateway pattern.
-- **Pure push** (owner, 2026-10-13): the observer never connects to a machine or service. Service probes run on the
+the collector exposes one entry point and needs no change when an agent is added. OpenTelemetry's agent + gateway pattern.
+- **Pure push** (owner, 2026-10-13): the collector never connects to an agent or service. Service probes run on the
   service's own machine: the agent's blackbox-exporter (`agent/blackbox.yml`, only HTTP 200 = up) probes the targets in
   `agent/probes/*.yml` (file_sd, per machine, gitignored; `example.yml.sample`) once a minute and pushes `probe_success`
   (kept: `probe_success|probe_http_status_code|probe_duration_seconds`). Service DOWN = `probe_success < 1` for 4m; a dead
   machine stops sending probes too (no data = OK), so only Machine DOWN fires. The gateway's own blackbox job was removed:
-  it could only reach what the observer reaches (the Mac's app only while everything ran on the Mac).
+  it could only reach what the collector reaches (the Mac's app only while the Mac was the collector too).
 - **Gateway** (`otel-collector`): OTLP gRPC :4317 only, TLS with `client_ca_file` = a client certificate signed by our CA is
-  required. Bound to `${OTEL_GATEWAY_BIND:-127.0.0.1}`; on the observer set `0.0.0.0` (open to any IP). Certificates from
-  `pki/gateway/` (SANs = every IP / name agents dial: locally `host.docker.internal`; remote the observer's public IP).
-  On a Linux observer the collector (uid 10001) must own the key: `sudo chown 10001:10001 pki/gateway/gateway.key` (keep 0600),
+  required. Bound to `${OTEL_GATEWAY_BIND:-127.0.0.1}`; on the collector set `0.0.0.0` (open to any IP). Certificates from
+  `pki/gateway/` (SANs = every IP / name agents dial: locally `host.docker.internal`; remote the collector's public IP).
+  On a Linux collector the `otel-collector` container's user (uid 10001) must own the key: `sudo chown 10001:10001 pki/gateway/gateway.key` (keep 0600),
   else "open /certs/gateway.key: permission denied" and a restart loop (seen 2026-10-13; Colima on the Mac ignores file owners).
-  Best practice used on the VM: create key + CSR there, sign the CSR with the CA on the Mac, copy back only the certificates.
-- **Agent** (`agent/`): receives OTLP/HTTP from local apps on 4318, scrapes node_exporter on the machine (label `service_namespace` =
+  Certificates (gateway and agents) are made by CSR: key + CSR on that host, Claude signs with the CA on this Mac, only
+  certificates travel back (commands in both runbooks; `scripts/pki.sh gateway|client` still generate key + cert on the Mac,
+  used for the local-mode gateway and `local-mac`).
+- **Agent** (`agent/`, `otel-agent`): receives OTLP/HTTP from local apps on 4318, scrapes node_exporter on the machine (label `service_namespace` =
   `SERVICE_NAMESPACE`), detects `host.name` (see Data model) and puts it on everything: traces/logs (replacing the SDK's
   hostname / container id), metrics as `instance` (via service.instance.id) and `host_name`; adds `service.namespace` when
   the app has none; exports OTLP gRPC + client certificate to `GATEWAY_ENDPOINT`. Disk-backed sending queue
@@ -192,7 +207,7 @@ the observer exposes one entry point and needs no change when a machine is added
   after restart with their original timestamps.
 - **Revocation**: the collector has no CRL. To cut off one machine: new CA (`rm -r pki; pki.sh init`), new gateway cert, new
   client certs for the machines that stay. Client certs are valid 2 years, the gateway cert 825 days, the CA 10 years.
-- **Apps in Docker on a VM** (sclaser-food): the agent (host network) listens on the docker0 address
+- **Apps in Docker on a Linux agent** (sclaser-food): the agent (host network) listens on the docker0 address
   (`AGENT_OTLP_BIND=172.17.0.1:4318`); app containers send to `http://host.docker.internal:4318` with
   `extra_hosts: host.docker.internal:host-gateway` (sclaser-food's compose has both). On Linux host-gateway = docker0's IP.
   Verified 2026-10-13 on Docker 29 with host.docker.internal mapped to 172.17.0.1: containers on the default bridge and on a
@@ -233,7 +248,7 @@ is gitignored) — migrations only go forward.
 - `PUT /api/{org}/dashboards/{id}` needs `?folder=` and `&hash=` (the current hash from the list call); a dashboard's hash changes on every write.
 
 ## Deployment (GCP VM, since 2026-10-13)
-- **Observer**: `ssh GCP_aoeskills` = `aoeskills-first-host` (project `united-rope-297316`, zone asia-northeast1-b, external IP
+- **Collector**: `ssh GCP_aoeskills` = `aoeskills-first-host` (project `united-rope-297316`, zone asia-northeast1-b, external IP
   `34.146.61.17`, 2 vCPU / 1.9 GB RAM / 9.7 GB disk), repo in `~/observability`, `docker compose -f docker-compose.prod.yml`.
   Storage: GCS bucket `aoeskills_bucket-1` (S3 XML API + HMAC key), Cloud SQL Postgres on a private IP, user `obs_app` (db-init
   created the three databases itself). Uses ~1.4 GB RAM (OpenObserve ~310 MB, Grafana ~345 MB, collector ~75 MB), ~2.4 GB disk free.
@@ -242,8 +257,8 @@ is gitignored) — migrations only go forward.
 - **Gateway**: GCP firewall rule `allow-otel-gateway` = tcp:4317 from 0.0.0.0/0 to network tag `otel-gateway` (owner: the Mac's IP
   changes, the client certificate is the key); `.env` `OTEL_GATEWAY_BIND=0.0.0.0`; certificate SAN `34.146.61.17`, key created on
   the VM (CSR signed with the CA on the Mac), owned by uid 10001.
-- **CA**: only on the Mac (`pki/ca.key`). The owner asks the agent (Claude) to sign certificates for new machines; preferred:
-  key + CSR on the machine, sign on the Mac, copy back only certificates (keys never travel).
+- **CA**: only on this Mac (`pki/ca.key`). The owner asks Claude to sign certificates for new agents (and the gateway):
+  key + CSR on that host, sign on this Mac, copy back only certificates (keys never travel).
 - **Access**: `ssh -N -L 8080:127.0.0.1:80 GCP_aoeskills` → http://localhost:8080/grafana/, or Tailscale
   http://aoeskills-first-host.tail8656d8.ts.net/grafana/ (`tailscale serve` forwards tailnet :80 to 127.0.0.1:80). Both verified.
 - **Passwords** (found while deploying): Cloud SQL requires lower + upper + digit + special, and `PG_PASSWORD` goes into a URL
@@ -253,14 +268,14 @@ is gitignored) — migrations only go forward.
   check a token without sending: `GET https://api.line.me/v2/bot/info` with `Authorization: Bearer <token>` (200 = valid). Test a
   contact point on Grafana 13: `POST /grafana/apis/notifications.alerting.grafana.app/v1beta1/namespaces/default/receivers/<base64url(name)>/test`
   with `{"integration": <the receiver's stored integration>, "alert": {...}}` (the old `/api/alertmanager/.../receivers/test` → 410).
-- **This Mac as a monitored machine**: the local observer is stopped (`docker compose -f docker-compose.local.yml down`, data kept);
+- **This Mac as an agent**: its local-mode collector is stopped (`docker compose -f docker-compose.local.yml down`, data kept);
   the agent runs alone: `cd agent && docker compose -f docker-compose.yml -f docker-compose.mac.yml up -d` (`agent/.env`:
   `HOST_NAME=local-mac`, `SERVICE_NAMESPACE=sclaser_food`, `GATEWAY_ENDPOINT=34.146.61.17:4317`; probes in
   `agent/probes/sclaser-food.yml`). sclaser-food runs in prod mode on the Mac (`npm run build && npm run start:daemon`, `.env.local`).
 - Verified 2026-10-13 end to end: Mac metrics / traces / logs / service probe → gateway → OpenObserve → GCS; Fleet Overview cards;
   Service DOWN pending after stopping sclaser-food, back to normal after restart; Machine DOWN briefly pending once when the
   agent's gRPC connection dropped (EOF, reconnected after 5 s) — watch for repeats (keepalive).
-- Still open: the agent on a real Linux VM (node-exporter profile, GCP host.name detection — the VM itself runs no agent yet);
+- Still open: an agent on a real Linux VM (node-exporter profile, GCP host.name detection — the collector VM runs no agent yet);
   the sclaser VM (`34.104.203.72`) still exposes node_exporter :9100 from the old stack — close it when it gets an agent;
   retention actually deleting expired files.
 
@@ -275,10 +290,10 @@ dashboards are relative: `../openobserve/...` (`o2_links.py`; Grafana rewrites `
 
 ## Operating
 - Local, everything incl. this Mac's agent: `docker compose -f docker-compose.local.yml up -d` / `down` (volumes kept; `down -v` deletes all data).
-  Prod observer: `docker compose -f docker-compose.prod.yml up -d` / `down`. Needs Docker Compose ≥ 2.20 (`include`).
+  Prod collector: `docker compose -f docker-compose.prod.yml up -d` / `down`. Needs Docker Compose ≥ 2.20 (`include`).
   Why no wrapper script: `include` with `env_file` gives each mode its storage settings, and an including file may extend an
   included service (local adds `depends_on` on its bucket / postgres). Verified 2026-10-13: up, data kept, down removes all.
-- Remote machines run only `agent/` (`docker compose up -d` there); this Mac too since the deploy (see "Deployment").
+- Agents run only `agent/` (`docker compose up -d` there); this Mac too since the deploy (see "Deployment").
 - Change collector config → `docker compose -f docker-compose.local.yml restart otel-collector`. Change an env file → `docker compose -f docker-compose.local.yml up -d` (recreate).
 - Query from a shell: PromQL `GET /openobserve/api/default/prometheus/api/v1/query?query=...`; SQL `POST /openobserve/api/default/_search?type=logs|traces|metrics`
   with `{"query":{"sql":..., "start_time":µs, "end_time":µs}}`. Basic auth with the `.env` credentials.

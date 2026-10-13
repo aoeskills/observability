@@ -1,11 +1,11 @@
 # OpenTelemetry Collector, agent role: one per machine. Collects everything on this machine the same way and pushes it
-# to the observer's gateway over one mTLS connection (client certificate from scripts/pki.sh):
+# to the collector's gateway over one mTLS connection (client certificate from scripts/pki.sh):
 #   - apps on this machine send OTLP to this agent (localhost:4318), as they would to any collector
 #   - node_exporter is scraped locally (never exposed off the machine)
 #   - this machine's services are probed locally (blackbox-exporter, targets in agent/probes/*.yml): pure push, the
-#     observer never connects to a machine or service
+#     collector never connects to an agent or service
 #   - everything is labelled with this machine's name (OpenTelemetry host.name) and namespace (project), queued on disk while the gateway is unreachable, and sent on
-# Adding a machine = run this agent there with its own name + certificate; nothing changes on the observer (docs/agent-runbook.md).
+# Adding an agent = run this there with its own name + certificate; nothing changes on the collector (docs/agent-runbook.md).
 extensions:
   file_storage/queue:
     directory: /var/lib/otelcol/queue
@@ -103,7 +103,7 @@ processors:
 
 exporters:
   otlp/gateway:
-    endpoint: ${env:GATEWAY_ENDPOINT} # <observer ip or name>:4317, must match the gateway certificate's SAN
+    endpoint: ${env:GATEWAY_ENDPOINT} # <collector ip or name>:4317, must match the gateway certificate's SAN
     tls:
       ca_file: /certs/ca.crt
       cert_file: /certs/client.crt

@@ -2,7 +2,7 @@
 # that talks to OpenObserve (apps and agents never hold OpenObserve credentials).
 # Agents connect with OTLP gRPC on :4317 and must present a client certificate signed by our CA (mTLS, scripts/pki.sh):
 # that is both the encryption and the authentication. Each agent sends its machine's metrics, traces and logs; the gateway
-# itself only scrapes what lives on the observer (thresholds, machine inventory). Nothing is probed from here: pure push.
+# itself only scrapes what lives on the collector (thresholds, machine inventory). Nothing is probed from here: pure push.
 # It is also where this stack protects itself: whatever a service sends, the limits below (request size,
 # attribute count/length, scrape size, memory) keep one noisy or broken service from filling OpenObserve.
 #   traces, logs : OTLP from agents -> OpenObserve stream "ingest" -> OpenObserve pipelines move each record to the stream named
