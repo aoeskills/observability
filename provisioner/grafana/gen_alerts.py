@@ -31,8 +31,8 @@ if MODE == "test":   # short timers so a test run finishes in a few minutes
     T = dict(imm_wait="10s", imm_int="1m", imm_rep="8760h", start_wait="20s", every="1m", pend="1m", pend_usage="1m", pend_down="1m")
 else:
     T = dict(imm_wait="30s", imm_int="5m", imm_rep="8760h", start_wait="1m", every="1m", pend="1m", pend_usage="2m", pend_down="4m")
-    # pend_down: rules are evaluated every 1m, so pending 4m = 5 evaluations in a row without the machine's state
-    # (owner: "every minute, 5 in a row"). A short network hiccup does not page the owner.
+    # pend_down (machine and service DOWN): rules are evaluated every 1m and the agents probe services every 1m, so pending
+    # 4m = 5 bad evaluations in a row (owner: "every minute, 5 in a row"). A short hiccup does not page the owner.
 
 # Scheduled digest (owner, 2026-10-13: 05:00 and 17:00 UTC+8). Alertmanager has no cron: the digest group flushes every
 # minute, but only inside a 2-minute active time interval at each time; repeat 1h > the window, so one message per window
@@ -134,6 +134,12 @@ rules = [
          [prom_q("A", MACHINE_DOWN), reduce_("B", "A"), thresh("C", "B", "gt", 0)],
          "{{ $labels.instance }}（專案 {{ $labels.service_namespace }}）沒有回應：超過 1 分鐘沒收到它的狀態（agent、node_exporter"
          " 或整台機器停了）。已經不用的機器，在 Fleet Overview 它的卡片上按 Retire。", pend=T["pend_down"]),
+    # Services: probed by the agent on their own machine (agent/probes/*.yml) and pushed like everything else, so `instance`
+    # is the machine and `target` the probed URL. A dead machine stops sending probes too: then only Machine DOWN fires.
+    rule("service-down", "服務沒有回應 Service DOWN", "C",
+         [prom_q("A", 'probe_success{job="blackbox"}'), reduce_("B", "A"), thresh("C", "B", "lt", 1)],
+         "{{ $labels.service }}（在 {{ $labels.instance }}，專案 {{ $labels.service_namespace }}）沒有回應：{{ $labels.target }}"
+         " 連續 5 次不是 HTTP 200", pend=T["pend_down"]),
     usage_rule("usage-warn", "用量超過警告門檻 Usage over WARN", WARN_BREACH, "警告", "warning"),
     usage_rule("usage-crit", "用量超過嚴重門檻 Usage over CRIT", CRIT_BREACH, "嚴重", "critical"),
     rule("thresholds-missing", "門檻資料讀不到 Thresholds unavailable", "C",
@@ -150,7 +156,7 @@ TEMPLATE = r"""{{ define "digest.subject" -}}
 {{ define "digest.message" -}}
 {{- $bad := 0 -}}
 {{- range .Alerts.Firing }}{{ if ne .Labels.kind "heartbeat" }}{{ $bad = 1 }}{{ end }}{{ end -}}
-{{- if eq $bad 0 }}目前所有機器都正常：沒有失去回應，也沒有任何用量超過門檻。{{ else -}}
+{{- if eq $bad 0 }}目前所有機器與服務都正常：沒有失去回應，也沒有任何用量超過門檻。{{ else -}}
 目前有問題的項目：{{ range .Alerts.Firing }}{{ if ne .Labels.kind "heartbeat" }}
  - {{ .Labels.alertname }}: {{ .Annotations.summary }}{{ end }}{{ end }}{{ end }}
 {{ end }}

@@ -70,6 +70,9 @@ CROSS JOIN (VALUES ('cpu'), ('memory'), ('disk')) AS r(resource)
 LEFT JOIN usage_threshold d ON d.instance = '*' AND d.resource = r.resource
 LEFT JOIN usage_threshold t ON t.instance = i.instance AND t.resource = r.resource"""
 
+# services: probed by each machine's agent (agent/probes/*.yml); instance = that machine, target = the probed URL
+SERVICE_Q = f'max by(instance,service_namespace,service,target)(probe_success{{{P}}})'
+
 # ---------------------------------------------------------------- CSS
 CSS = """
 .toolbar{display:flex;justify-content:flex-end;padding:0 2px 8px}
@@ -115,6 +118,10 @@ CSS = """
 .card[data-resource="status"][data-up="1"] .pill.up{display:inline-block;background:#1f9d55}
 .card[data-resource="status"][data-up="0"] .pill.down{display:inline-block;background:#d93636}
 .pill{display:none;padding:2px 12px;border-radius:12px;font-weight:700;font-size:13px;color:#fff}
+.card[data-v="1"]{border-left-color:#1f9d55}
+.card[data-v="0"]{border-left-color:#d93636}
+.card[data-v="1"] .pill.up{display:inline-block;background:#1f9d55}
+.card[data-v="0"] .pill.down{display:inline-block;background:#d93636}
 """
 
 MACHINE_HTML = """<div class="toolbar"><button class="btn" data-action="defaults" title="Thresholds used by machines that have no values of their own">&#9881; Default thresholds</button></div>
@@ -131,6 +138,15 @@ MACHINE_HTML = """<div class="toolbar"><button class="btn" data-action="defaults
 </div>
 {{/each}}
 </div>""".replace("__SUB__", SUBPATH)
+
+SERVICE_HTML = """<div class="cards">
+{{#each data}}
+<div class="card" data-v="{{Value}}">
+  <div class="head"><span class="name">{{service}}</span><span class="pill up">UP</span><span class="pill down">DOWN</span></div>
+  <div class="labels">{{#each this}}<span class="chip" data-k="{{@key}}"><b>{{@key}}</b>:{{this}}</span>{{/each}}</div>
+</div>
+{{/each}}
+</div>"""
 
 # ---------------------------------------------------------------- JS (After Content Ready)
 AFTER_RENDER = r"""
@@ -311,6 +327,9 @@ dash = {
                      "filters": [{"fieldName": "resource", "config": {"id": "isNotNull"}}]}},
                     {"id": "sortBy", "options": {"sort": [{"field": "name"}, {"field": "order"}]}}],
                    AFTER_RENDER),
+        text_panel(2, "Services", 15, 5, [prom_t(SERVICE_Q)], SERVICE_HTML,
+                   "No probed services match the selected namespace (agent/probes/*.yml on each machine).",
+                   [{"id": "sortBy", "options": {"sort": [{"field": "service"}, {"field": "instance"}]}}]),
     ],
     "templating": {"list": [
         {"name": "ds", "label": "Datasource", "type": "datasource", "query": "prometheus",

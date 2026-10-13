@@ -1,6 +1,7 @@
 # The agent for one machine (see config.yaml), step by step in docs/agent-runbook.md. Settings come from agent/.env (copy
 # .env.example), the client certificate from agent/certs (scripts/pki.sh client <name>, then copy pki/clients/<name>/ there).
 #   Linux VM:   docker compose up -d     agent + node_exporter (profile node-exporter, on via COMPOSE_PROFILES in agent/.env)
+#               + blackbox-exporter (service probes, targets in agent/probes/*.yml)
 #   this Mac:   part of docker-compose.local.yml (with docker-compose.mac.yml); node_exporter is a Homebrew service there
 services:
   otel-agent:
@@ -19,9 +20,11 @@ services:
       GATEWAY_ENDPOINT: ${GATEWAY_ENDPOINT:?set in agent/.env}
       NODE_EXPORTER_TARGET: ${NODE_EXPORTER_TARGET:-127.0.0.1:9100}
       AGENT_OTLP_BIND: ${AGENT_OTLP_BIND:-127.0.0.1:4318}
+      BLACKBOX_TARGET: ${BLACKBOX_TARGET:-127.0.0.1:9115}
     volumes:
       - ./config.yaml:/etc/otelcol/config.yaml:ro
       - ${AGENT_CERTS_DIR:-./certs}:/certs:ro
+      - ./probes:/etc/otelcol/probes:ro # service probe targets (*.yml), see probes/example.yml.sample
       - agent-queue:/var/lib/otelcol
 
   node-exporter:
@@ -36,6 +39,17 @@ services:
     command: ["--path.rootfs=/host", "--web.listen-address=127.0.0.1:9100", "--no-collector.thermal_zone"]
     volumes:
       - /:/host:ro,rslave
+
+  blackbox-exporter:
+    # Probes this machine's services for the agent (targets: agent/probes/*.yml; only HTTP 200 = up). Listens on 127.0.0.1
+    # only; the agent scrapes it once a minute and pushes probe_success with everything else.
+    image: prom/blackbox-exporter:latest
+    container_name: blackbox-exporter
+    restart: unless-stopped
+    network_mode: host
+    command: ["--config.file=/etc/blackbox_exporter/config.yml", "--web.listen-address=127.0.0.1:9115"]
+    volumes:
+      - ./blackbox.yml:/etc/blackbox_exporter/config.yml:ro
 
 volumes:
   agent-queue:

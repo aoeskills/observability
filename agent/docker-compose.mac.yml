@@ -11,3 +11,13 @@ services:
     environment:
       NODE_EXPORTER_TARGET: host.docker.internal:9100
       AGENT_OTLP_BIND: 0.0.0.0:4318
+      BLACKBOX_TARGET: host.docker.internal:9115
+
+  blackbox-exporter:
+    # probes apps on the Mac at host.docker.internal:<port> (agent/probes/*.yml); the agent reaches it the same way
+    network_mode: bridge
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    ports:
+      - 127.0.0.1:9115:9115
+    command: ["--config.file=/etc/blackbox_exporter/config.yml", "--web.listen-address=0.0.0.0:9115"]

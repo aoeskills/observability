@@ -1,0 +1,9 @@
+# blackbox-exporter modules for the agent's service probes (agent/probes/*.yml): only HTTP 200 counts as up.
+modules:
+  http_200:
+    prober: http
+    timeout: 10s
+    http:
+      method: GET
+      valid_status_codes: [200]
+      follow_redirects: true

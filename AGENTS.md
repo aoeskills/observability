@@ -31,7 +31,7 @@ reference only — see `docs/takeaways-from-grafana.md`. The owner writes Chines
 | `db/init.sql` | run by `db-init` on every start: creates databases `openobserve`, `grafana`, `monitoring` and table `usage_threshold` if missing |
 | `otel-collector/config.yaml` | the gateway: OTLP gRPC + mTLS from agents → OpenObserve stream `ingest` (pipelines move it to one stream per `service.namespace`); scrapes postgres-exporter (thresholds, machine inventory) → Prometheus remote write → OpenObserve |
 | `retention.json` | days OpenObserve keeps each project's traces / logs (`sclaser_food`: 90); unlisted projects use `O2_RETENTION_DAYS` |
-| `agent/` | the per-machine agent (compose + config + `.env.example`; `docker-compose.mac.yml` for this Mac): apps' OTLP + local node_exporter → gateway |
+| `agent/` | the per-machine agent (compose + config + `.env.example`; `docker-compose.mac.yml` for this Mac): apps' OTLP + local node_exporter + service probes (`blackbox.yml`, targets `probes/*.yml`) → gateway |
 | `scripts/pki.sh` | private CA, gateway certificate, one client certificate per machine → `pki/` (gitignored) |
 | `provisioner/provision.py` | the runtime loop (every `DASHBOARD_SYNC_INTERVAL` s); stdlib only |
 | `provisioner/openobserve_dashboards.py` | OpenObserve "API Service" dashboard for one stream (SQL over traces / logs) |
@@ -45,7 +45,8 @@ reference only — see `docs/takeaways-from-grafana.md`. The owner writes Chines
 ## Data model (what queries can rely on)
 - **Metrics**: Prometheus names and labels are kept (remote write), so PromQL from the old stack works. Every metric name is
   its own OpenObserve stream, which is why the collector drops metrics nobody uses (exporters' `go_*`, postgres-exporter's
-  `pg_*`). Labels: `job`, `instance`, `service_namespace` (the project, see "Projects"). For machines `instance` is the
+  `pg_*`). Labels: `job`, `instance`, `service_namespace` (the project, see "Projects"); service probes (`job="blackbox"`) add
+  `service` and `target` (the probed URL), their `instance` is the probing machine. For machines `instance` is the
   machine name = OpenTelemetry `host.name`, detected by the agent (resourcedetection, re-run every minute: `HOST_NAME` in
   `agent/.env` if set > GCP instance name > OS hostname), also in label `host_name`; traces / logs carry the same
   `host.name` (OpenObserve `service_host_name` / `host_name`). Only the certificate's name stays fixed. Owner's requirement
@@ -120,12 +121,12 @@ One name end to end: OpenTelemetry's resource attribute **`service.namespace`** 
   both; an API edit of the dashboard was reverted on the next pass.
 
 ## Grafana: machines, services, thresholds, alerts
-Split decided by the owner (2026-10-12): Grafana for machine status, thresholds and LINE alerts (the GCP design, ported);
+Split decided by the owner (2026-10-12): Grafana for machine/service status, thresholds and LINE alerts (the GCP design, ported);
 OpenObserve for storage and logs/traces. Grafana has **no Prometheus of its own**: its datasource `openobserve` is
 OpenObserve's Prometheus-compatible API (`/api/default/prometheus`, basic auth from `.env`).
 - Generators in `provisioner/grafana/` are the GCP ones with these changes: `round(x, 0.1)` → `round(x * 10) / 10` (OpenObserve
   rejects the 2-arg form), macOS memory branch (`or (active + wired + compressed) / total`), Grafana served at `/grafana` behind Caddy as on GCP
-  (`caddy/Caddyfile`, `GF_SERVER_SERVE_FROM_SUB_PATH`), datasource uid `openobserve`, machine-down pending 4m (owner: "every minute, 5 in a row").
+  (`caddy/Caddyfile`, `GF_SERVER_SERVE_FROM_SUB_PATH`), datasource uid `openobserve`, machine-down pending 4m like service-down (owner: both "every minute, 5 in a row").
 - OpenObserve's Prometheus API: `label/<name>/values` needs `match[]` (Grafana sends it when the variable query names a
   metric), no `status/buildinfo` (harmless). Tested: label_replace, label_join, group_left, `^ 0`, last_over_time, absent, unless
   (see the label_replace / set-operation quirks under "OpenObserve gotchas").
@@ -163,12 +164,18 @@ OpenObserve's Prometheus-compatible API (`/api/default/prometheus`, basic auth f
 ## Agent + gateway (mTLS)
 Owner's decision (2026-10-13): every machine pushes everything (node_exporter metrics, apps' traces and logs) through one agent;
 the observer exposes one entry point and needs no change when a machine is added. OpenTelemetry's agent + gateway pattern.
-- **Pure push** (owner, 2026-10-13): the observer never connects to a machine or service. The GCP-era blackbox service
-  probes (Service DOWN, Fleet Overview "Services") were removed: they could only reach what the observer reaches. A dead
-  machine is detected by silence (Machine DOWN); a service's health is in its traces / logs in OpenObserve.
+- **Pure push** (owner, 2026-10-13): the observer never connects to a machine or service. Service probes run on the
+  service's own machine: the agent's blackbox-exporter (`agent/blackbox.yml`, only HTTP 200 = up) probes the targets in
+  `agent/probes/*.yml` (file_sd, per machine, gitignored; `example.yml.sample`) once a minute and pushes `probe_success`
+  (kept: `probe_success|probe_http_status_code|probe_duration_seconds`). Service DOWN = `probe_success < 1` for 4m; a dead
+  machine stops sending probes too (no data = OK), so only Machine DOWN fires. The gateway's own blackbox job was removed:
+  it could only reach what the observer reaches (the Mac's app only while everything ran on the Mac).
 - **Gateway** (`otel-collector`): OTLP gRPC :4317 only, TLS with `client_ca_file` = a client certificate signed by our CA is
   required. Bound to `${OTEL_GATEWAY_BIND:-127.0.0.1}`; on the observer set `0.0.0.0` (open to any IP). Certificates from
   `pki/gateway/` (SANs = every IP / name agents dial: locally `host.docker.internal`; remote the observer's public IP).
+  On a Linux observer the collector (uid 10001) must own the key: `sudo chown 10001:10001 pki/gateway/gateway.key` (keep 0600),
+  else "open /certs/gateway.key: permission denied" and a restart loop (seen 2026-10-13; Colima on the Mac ignores file owners).
+  Best practice used on the VM: create key + CSR there, sign the CSR with the CA on the Mac, copy back only the certificates.
 - **Agent** (`agent/`): receives OTLP/HTTP from local apps on 4318, scrapes node_exporter on the machine (label `service_namespace` =
   `SERVICE_NAMESPACE`), detects `host.name` (see Data model) and puts it on everything: traces/logs (replacing the SDK's
   hostname / container id), metrics as `instance` (via service.instance.id) and `host_name`; adds `service.namespace` when

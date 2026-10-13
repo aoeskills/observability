@@ -9,3 +9,4 @@ backups/
 /pki/
 /agent/.env
 /agent/certs/
+/agent/probes/*.yml

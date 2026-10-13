@@ -1,7 +1,7 @@
 # Observability（OpenObserve + Grafana）
 
 監控機器狀態（node_exporter）與 API 服務的 logs / traces（OpenTelemetry），用來 debug。
-分工：**Grafana** 看機器狀態、改門檻、發 LINE 告警（沿用 GCP 的 Fleet Overview 設計）；**OpenObserve** 存所有資料（含 metrics），並負責 logs / traces 的查詢。
+分工：**Grafana** 看機器與服務狀態、改門檻、發 LINE 告警（沿用 GCP 的 Fleet Overview 設計）；**OpenObserve** 存所有資料（含 metrics），並負責 logs / traces 的查詢。
 目前只跑在本機，但所有狀態都在 bucket + 一台 Postgres（用 env 指定），可以直接部署到雲端。先前的 Prometheus + Grafana 只當參考，整理在 [docs/takeaways-from-grafana.md](docs/takeaways-from-grafana.md)。
 
 **儀表板和告警規則不在 repo 裡、也不在 UI 上編輯**：`provisioner` 服務每 60 秒依「目前實際存在的東西」產生它們（每個 project 的 stream 一個 OpenObserve 儀表板、Grafana 上對應的連結、stream 的分流規則和保存天數）。新 project 送進資料後會自動出現，stream 被刪除後自動消失；UI 上的修改會被還原。要改內容就改 `provisioner/` 裡的 generator。
@@ -12,8 +12,8 @@
 |---|---|---|
 | OpenObserve | http://localhost/openobserve/ | 儲存；logs / traces 查詢（SQL）；每個 project（OpenTelemetry 的 `service.namespace`）一個 stream，自動建立 |
 | Grafana | http://localhost/grafana/ | Fleet Overview（每台機器的卡片、✎ 改門檻）→ Node Exporter Details；LINE 告警。metrics 從 OpenObserve 的 Prometheus API 讀 |
-| otel-collector（gateway） | 4317（gRPC + mTLS） | 唯一入口：只接受帶我們 CA 簽發憑證的 agent；另外 scrape 門檻，再送進 OpenObserve。純 push：observer 不主動檢查任何機器或服務。OpenObserve 帳密只放在這裡 |
-| otel-agent（每台機器一個，`agent/`） | 127.0.0.1:4318 | 收本機 app 的 OTLP、在本機 scrape node_exporter，全部加上機器名稱，用 client 憑證推給 gateway；gateway 斷線時資料先存在磁碟佇列 |
+| otel-collector（gateway） | 4317（gRPC + mTLS） | 唯一入口：只接受帶我們 CA 簽發憑證的 agent；另外 scrape 門檻，再送進 OpenObserve。純 push：observer 不主動連任何機器或服務。OpenObserve 帳密只放在這裡 |
+| otel-agent（每台機器一個，`agent/`） | 127.0.0.1:4318 | 收本機 app 的 OTLP、在本機 scrape node_exporter、用本機的 blackbox-exporter 探測本機服務（`agent/probes/*.yml`），全部加上機器名稱，用 client 憑證推給 gateway；gateway 斷線時資料先存在磁碟佇列 |
 | provisioner | – | 維持 OpenObserve 的分流 pipeline、套用各 project 的保存天數（`retention.json`）、產生 Grafana 儀表板與告警規則、每個 stream 的 OpenObserve 儀表板 |
 | postgres-exporter | – | 把門檻和機器清單變成 metrics（給告警、Fleet Overview 用） |
 | db-init | – | 每次啟動建立缺少的 DB 和門檻表，跑完就結束 |
@@ -88,6 +88,7 @@ sclaser-food 的 session cookie 是加密的 `{sessionToken, userId, username}`�
 
 | 告警 | 條件 |
 |---|---|
+| 服務沒有回應 | 那台機器的 agent 每分鐘探測一次（`agent/probes/*.yml`），連續 5 次不是 HTTP 200。整台機器停了則只發「機器沒有回應」 |
 | 機器沒有回應 | 曾經出現過的機器超過 1 分鐘沒送狀態，持續 4 分鐘（agent、node_exporter 或整台機器停了）。卡片變紅色 DOWN；不再使用的機器在卡片上按 **Retire** 移除 |
 | 用量超過警告 / 嚴重門檻 | CPU、記憶體、磁碟 `/` 超過該機器的門檻（持續 2 分鐘） |
 | 門檻資料讀不到 | 門檻 DB 或 postgres-exporter 掛了 |
@@ -134,4 +135,4 @@ UI 上手動新建的 OpenObserve 儀表板（說明裡沒有 `[managed: ...]` �
 
 1. 讓服務把 OTLP traces / logs 送到本機的 agent（`http://localhost:4318`，`OTEL_EXPORTER_OTLP_ENDPOINT` 的預設值），設 `service.name`（服務）和 `service.namespace`（project，例如 `sclaser_food`）。沒設 namespace 的話用該機器 agent 的 `SERVICE_NAMESPACE`。
 2. 不用改 observer：OpenObserve 收到新的 namespace 就自動建立同名 stream，儀表板和 Grafana 連結隨後出現。保存天數不是預設 30 天的話，在 `retention.json` 加一行（例如 `"sclaser_food": 90`）。
-3. observer 不探測服務（純 push）：服務的狀況看 OpenObserve 的 traces / logs（錯誤率、延遲）；機器停了由「機器沒有回應」告警涵蓋。
+3. 服務探測：在服務所在機器的 `agent/probes/` 放一個 `.yml`（照 `example.yml.sample`），一分鐘內 Fleet Overview 的 Services 出現它的卡片，告警自動涵蓋。observer 不用改。

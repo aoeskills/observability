@@ -2,6 +2,8 @@
 # to the observer's gateway over one mTLS connection (client certificate from scripts/pki.sh):
 #   - apps on this machine send OTLP to this agent (localhost:4318), as they would to any collector
 #   - node_exporter is scraped locally (never exposed off the machine)
+#   - this machine's services are probed locally (blackbox-exporter, targets in agent/probes/*.yml): pure push, the
+#     observer never connects to a machine or service
 #   - everything is labelled with this machine's name (OpenTelemetry host.name) and namespace (project), queued on disk while the gateway is unreachable, and sent on
 # Adding a machine = run this agent there with its own name + certificate; nothing changes on the observer (docs/agent-runbook.md).
 extensions:
@@ -33,6 +35,35 @@ receivers:
             - source_labels: [__name__]
               regex: "go_.*|promhttp_.*"
               action: drop
+
+        # This machine's services: HTTP 200 from the URL = up, checked once a minute through the local blackbox-exporter.
+        # Targets in agent/probes/*.yml (file_sd format; none = no probes), labels per target: service (required),
+        # service_namespace (default: this machine's SERVICE_NAMESPACE). instance = this machine (transform/host), like
+        # every metric from here; the probed URL is kept as label `target`.
+        - job_name: blackbox
+          scrape_interval: 1m
+          metrics_path: /probe
+          params:
+            module: [http_200]
+          file_sd_configs:
+            - files: [/etc/otelcol/probes/*.yml]
+              refresh_interval: 1m
+          relabel_configs:
+            - source_labels: [__address__]
+              target_label: __param_target
+            - source_labels: [__param_target]
+              target_label: target
+            - source_labels: [service_namespace]
+              regex: ""
+              target_label: service_namespace
+              replacement: ${env:SERVICE_NAMESPACE}
+            - target_label: __address__
+              replacement: ${env:BLACKBOX_TARGET}
+          # every metric name is an OpenObserve stream: keep what the cards / alerts use plus status code and duration
+          metric_relabel_configs:
+            - source_labels: [__name__]
+              regex: "probe_success|probe_http_status_code|probe_duration_seconds"
+              action: keep
 
 processors:
   memory_limiter:
