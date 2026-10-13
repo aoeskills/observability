@@ -1,0 +1,7 @@
+# Prod mode, the observer host:
+#   docker compose -f docker-compose.prod.yml up -d         docker compose -f docker-compose.prod.yml down
+# External bucket + Postgres (e.g. GCS + Cloud SQL) from .prod.env (copy .prod.env.example), shared secrets from .env.
+# The services refuse to start while a storage setting is missing. Monitored machines run agent/ on their own.
+include:
+  - path: docker-compose.yml
+    env_file: .prod.env

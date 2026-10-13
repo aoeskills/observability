@@ -1,0 +1,13 @@
+# On a Mac, Docker runs in a VM (Colima), so "host network" would be the VM's, not the Mac's. The agent uses the normal
+# Docker network instead: apps on the Mac reach it on 127.0.0.1:4318, it reaches node_exporter and the gateway via
+# host.docker.internal (the Mac's loopback).
+services:
+  otel-agent:
+    network_mode: bridge
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    ports:
+      - 127.0.0.1:4318:4318
+    environment:
+      NODE_EXPORTER_TARGET: host.docker.internal:9100
+      AGENT_OTLP_BIND: 0.0.0.0:4318

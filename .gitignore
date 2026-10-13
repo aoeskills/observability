@@ -1,0 +1,11 @@
+.env
+.prod.env
+*.pyc
+__pycache__/
+.DS_Store
+backups/
+
+# private CA and certificates (scripts/pki.sh); agent machine settings and certs
+/pki/
+/agent/.env
+/agent/certs/

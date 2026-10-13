@@ -1,0 +1,13 @@
+# Dashboards are the JSON files next to this one in the provisioning volume, written by the provisioner service
+# (provisioner/provision.py); they are not in the repo and cannot be saved from the UI.
+apiVersion: 1
+
+providers:
+  - name: file-dashboards
+    orgId: 1
+    type: file
+    disableDeletion: false
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/provisioning/dashboards

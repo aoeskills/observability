@@ -1,0 +1,17 @@
+# Metrics for the machine / service dashboards and alerts come from OpenObserve's Prometheus-compatible API
+# (the collector remote-writes them there). Credentials from the container env (.env).
+apiVersion: 1
+
+datasources:
+  - name: OpenObserve
+    uid: openobserve
+    type: prometheus
+    access: proxy
+    url: http://openobserve:5080/openobserve/api/${O2_ORG}/prometheus
+    isDefault: true
+    basicAuth: true
+    basicAuthUser: ${ZO_ROOT_USER_EMAIL}
+    secureJsonData:
+      basicAuthPassword: ${ZO_ROOT_USER_PASSWORD}
+    jsonData:
+      timeInterval: 15s

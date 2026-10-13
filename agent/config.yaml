@@ -1,0 +1,102 @@
+# OpenTelemetry Collector, agent role: one per machine. Collects everything on this machine the same way and pushes it
+# to the observer's gateway over one mTLS connection (client certificate from scripts/pki.sh):
+#   - apps on this machine send OTLP to this agent (localhost:4318), as they would to any collector
+#   - node_exporter is scraped locally (never exposed off the machine)
+#   - everything is labelled with this machine's name (OpenTelemetry host.name) and namespace (project), queued on disk while the gateway is unreachable, and sent on
+# Adding a machine = run this agent there with its own name + certificate; nothing changes on the observer (docs/agent-runbook.md).
+extensions:
+  file_storage/queue:
+    directory: /var/lib/otelcol/queue
+    create_directory: true
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: ${env:AGENT_OTLP_BIND} # 127.0.0.1:4318 on a VM (host network); 0.0.0.0:4318 inside Docker on a Mac
+
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: node
+          scrape_interval: 15s
+          sample_limit: 20000
+          static_configs:
+            - targets: ["${env:NODE_EXPORTER_TARGET}"]
+              labels:
+                # OpenTelemetry's service.namespace (the project) in Prometheus label form; Fleet Overview's filter
+                service_namespace: ${env:SERVICE_NAMESPACE}
+          # instance and host_name are set from the detected host.name (transform/host below), not here.
+          # node_exporter's Go runtime metrics are dropped: every metric name becomes an OpenObserve stream and no
+          # dashboard uses them (process_* stays: Node Exporter Details shows the exporter's own CPU / memory / fds).
+          metric_relabel_configs:
+            - source_labels: [__name__]
+              regex: "go_.*|promhttp_.*"
+              action: drop
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 200
+    spike_limit_mib: 50
+  # host.name = the machine's name, on everything this agent sends. Detected, first detector that knows it wins, and
+  # re-detected every minute, so a VM renamed at the cloud provider shows its new name on the dashboards within a minute:
+  #   env     OTEL_RESOURCE_ATTRIBUTES=host.name=<HOST_NAME>, only when HOST_NAME is set in agent/.env: machines without
+  #           cloud metadata, e.g. this Mac (its agent runs in a container whose hostname is random)
+  #   gcp     the instance name from the GCE metadata server
+  #   system  the OS hostname
+  # override: true replaces the SDK's own host.name on traces / logs (an OS hostname, or a container id for apps in Docker).
+  # OpenObserve fields: service_host_name (traces), host_name (logs); metrics: see transform/host.
+  resourcedetection:
+    detectors: [env, gcp, system]
+    system:
+      hostname_sources: [os]
+    refresh_interval: 1m
+    override: true
+  # Metrics: the machine's Prometheus identity `instance` (key of the cards, alerts, thresholds and machine inventory) and
+  # label host_name both = host.name. Remote write takes `instance` from service.instance.id.
+  transform/host:
+    error_mode: ignore
+    metric_statements:
+      - statements:
+          - set(resource.attributes["service.instance.id"], resource.attributes["host.name"]) where resource.attributes["host.name"] != nil
+      - statements:
+          - set(datapoint.attributes["host_name"], resource.attributes["host.name"]) where resource.attributes["host.name"] != nil
+  # Which project: an app's own service.namespace wins, apps without one get this machine's (it picks the OpenObserve stream).
+  resource/namespace:
+    attributes:
+      - key: service.namespace
+        value: ${env:SERVICE_NAMESPACE}
+        action: insert
+  batch: {}
+
+exporters:
+  otlp/gateway:
+    endpoint: ${env:GATEWAY_ENDPOINT} # <observer ip or name>:4317, must match the gateway certificate's SAN
+    tls:
+      ca_file: /certs/ca.crt
+      cert_file: /certs/client.crt
+      key_file: /certs/client.key
+    # Survives a gateway outage or an agent restart: unsent data waits on disk and is retried.
+    sending_queue:
+      enabled: true
+      storage: file_storage/queue
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 1h
+
+service:
+  extensions: [file_storage/queue]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resourcedetection, resource/namespace, batch]
+      exporters: [otlp/gateway]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, resourcedetection, resource/namespace, batch]
+      exporters: [otlp/gateway]
+    metrics:
+      receivers: [prometheus]
+      processors: [memory_limiter, resourcedetection, transform/host, batch]
+      exporters: [otlp/gateway]

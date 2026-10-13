@@ -1,0 +1,4 @@
+{
+  "_about": "Days OpenObserve keeps each project's traces and logs (stream = service.namespace). Projects not listed use O2_RETENTION_DAYS (.env, default 30). Applied by the provisioner within a minute; OpenObserve's compactor deletes expired files from the bucket.",
+  "sclaser_food": 90
+}

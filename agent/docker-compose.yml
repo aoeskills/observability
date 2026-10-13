@@ -1,0 +1,41 @@
+# The agent for one machine (see config.yaml), step by step in docs/agent-runbook.md. Settings come from agent/.env (copy
+# .env.example), the client certificate from agent/certs (scripts/pki.sh client <name>, then copy pki/clients/<name>/ there).
+#   Linux VM:   docker compose up -d     agent + node_exporter (profile node-exporter, on via COMPOSE_PROFILES in agent/.env)
+#   this Mac:   part of docker-compose.local.yml (with docker-compose.mac.yml); node_exporter is a Homebrew service there
+services:
+  otel-agent:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: otel-agent
+    restart: unless-stopped
+    # root inside the container: the disk-queue volume is created root-owned and the client key is readable by its
+    # owner only (0600); the image's default user (10001) could use neither. Machine agents commonly run as root.
+    user: "0:0"
+    network_mode: host
+    command: ["--config=/etc/otelcol/config.yaml"]
+    environment:
+      # host.name override for the resourcedetection env detector; unset = detected (GCP instance name, else OS hostname)
+      OTEL_RESOURCE_ATTRIBUTES: ${HOST_NAME:+host.name=${HOST_NAME}}
+      SERVICE_NAMESPACE: ${SERVICE_NAMESPACE:?set in agent/.env}
+      GATEWAY_ENDPOINT: ${GATEWAY_ENDPOINT:?set in agent/.env}
+      NODE_EXPORTER_TARGET: ${NODE_EXPORTER_TARGET:-127.0.0.1:9100}
+      AGENT_OTLP_BIND: ${AGENT_OTLP_BIND:-127.0.0.1:4318}
+    volumes:
+      - ./config.yaml:/etc/otelcol/config.yaml:ro
+      - ${AGENT_CERTS_DIR:-./certs}:/certs:ro
+      - agent-queue:/var/lib/otelcol
+
+  node-exporter:
+    # The machine's own status for a Linux VM; only listens on 127.0.0.1, the agent scrapes it. Skipped when the VM already
+    # runs a node_exporter (remove COMPOSE_PROFILES from agent/.env, point NODE_EXPORTER_TARGET at it).
+    image: prom/node-exporter:latest
+    container_name: node-exporter
+    profiles: [node-exporter]
+    restart: unless-stopped
+    network_mode: host
+    pid: host
+    command: ["--path.rootfs=/host", "--web.listen-address=127.0.0.1:9100", "--no-collector.thermal_zone"]
+    volumes:
+      - /:/host:ro,rslave
+
+volumes:
+  agent-queue:

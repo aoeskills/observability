@@ -1,0 +1,21 @@
+# Reverse proxy: the one web entry point (127.0.0.1:80), services told apart by URL path (as on the old GCP stack).
+# Paths are forwarded unchanged, so each app serves under its own prefix: Grafana (GF_SERVER_SERVE_FROM_SUB_PATH +
+# GF_SERVER_ROOT_URL), OpenObserve (ZO_BASE_URI). Add a service = a `handle /name*` block here + the app's own prefix setting.
+{
+	auto_https off
+	admin off
+}
+
+http://:80 {
+	handle /grafana* {
+		reverse_proxy grafana:3000
+	}
+
+	handle /openobserve* {
+		reverse_proxy openobserve:5080
+	}
+
+	handle {
+		respond "not found" 404
+	}
+}

@@ -1,0 +1,207 @@
+# Observability stack, the observer. Not started on its own: docker-compose.local.yml / docker-compose.prod.yml include it
+# with the storage settings (O2_S3_*, PG_*, O2_EXT_AUTH_SALT) from .local.env / .prod.env.
+#   - OpenObserve stores everything (metrics, logs, traces): data in an S3-API bucket, metadata in Postgres.
+#   - Apps send OTLP traces/logs to the collector (127.0.0.1:4317 gRPC / 127.0.0.1:4318 HTTP); the collector also
+#     scrapes node_exporter, blackbox and postgres-exporter and remote-writes the metrics to OpenObserve.
+#   - Grafana: machine / service dashboards, thresholds and LINE alerts, reading metrics from OpenObserve.
+#   - One Postgres server, three databases (db/init.sql): openobserve, grafana, monitoring (thresholds).
+#   - Dashboards and alert rules are generated at runtime by the provisioner, never stored in the repo.
+#   - Web UIs through Caddy (caddy/Caddyfile) on one port, by path: /grafana/ and /openobserve/. No host name is configured
+#     anywhere (all links are relative), so the same stack works over localhost, an SSH tunnel and Tailscale at once.
+x-postgres: &pg_required
+  PG_HOST: "${PG_HOST:?set in .prod.env / .local.env}"
+  PG_PORT: ${PG_PORT:-5432}
+  PG_USER: "${PG_USER:?set in .prod.env / .local.env}"
+  PG_PASSWORD: "${PG_PASSWORD:?set in .prod.env / .local.env}"
+  PG_SSLMODE: ${PG_SSLMODE:-require}
+
+services:
+  db-init:
+    # One-shot on every start: creates the three databases and the thresholds table if missing (db/init.sql).
+    image: postgres:17-alpine
+    container_name: db-init
+    restart: "no"
+    environment:
+      <<: *pg_required
+    volumes:
+      - ./db/init.sql:/init.sql:ro
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        export PGHOST=$$PG_HOST PGPORT=$$PG_PORT PGUSER=$$PG_USER PGPASSWORD=$$PG_PASSWORD PGSSLMODE=$$PG_SSLMODE PGDATABASE=postgres;
+        for i in $$(seq 60); do pg_isready -q && break; sleep 2; done;
+        psql -v ON_ERROR_STOP=1 -q -f /init.sql
+
+  openobserve:
+    # Stable releases only (no -rc). Migrations only go forward: back up Postgres before moving to a newer version.
+    image: public.ecr.aws/zinclabs/openobserve:latest
+    container_name: openobserve
+    restart: unless-stopped
+    environment:
+      ZO_ROOT_USER_EMAIL: "${ZO_ROOT_USER_EMAIL:?set in .env}"
+      ZO_ROOT_USER_PASSWORD: "${ZO_ROOT_USER_PASSWORD:?set in .env}"
+      # Single-node mode with bucket storage: there is no local-disk storage mode in this stack.
+      ZO_LOCAL_MODE: "true"
+      ZO_LOCAL_MODE_STORAGE: s3
+      ZO_DATA_DIR: /data
+      ZO_TELEMETRY: "false"
+      # Served under /openobserve (Caddy); every API path then starts with /openobserve too (collector, Grafana, provisioner).
+      ZO_BASE_URI: /openobserve
+      # Bucket through the S3 API: RustFS locally, GCS (XML API + HMAC key) in prod. ZO_S3_PROVIDER=gcs would switch
+      # to the native GCS client, which ignores the endpoint, so it could not be emulated locally.
+      ZO_S3_PROVIDER: s3
+      ZO_S3_SERVER_URL: "${O2_S3_SERVER_URL:?set in .prod.env (GCS: https://storage.googleapis.com)}"
+      ZO_S3_REGION_NAME: "${O2_S3_REGION:?set in .prod.env (GCS: the bucket location, e.g. asia-east1)}"
+      ZO_S3_ACCESS_KEY: "${O2_S3_ACCESS_KEY:?set in .prod.env (GCS HMAC access id)}"
+      ZO_S3_SECRET_KEY: "${O2_S3_SECRET_KEY:?set in .prod.env (GCS HMAC secret)}"
+      ZO_S3_BUCKET_NAME: "${O2_S3_BUCKET:?set in .prod.env}"
+      # Several stacks can share one test bucket, each under its own prefix.
+      ZO_S3_BUCKET_PREFIX: ${O2_S3_PREFIX:-}
+      ZO_META_STORE: postgres
+      # PG_PASSWORD must be URL-safe here (e.g. openssl rand -hex 24).
+      ZO_META_POSTGRES_DSN: postgres://${PG_USER}:${PG_PASSWORD}@${PG_HOST}:${PG_PORT:-5432}/openobserve?sslmode=${PG_SSLMODE:-require}
+      # Required on a new install since v1.1.0; must never change for the same metadata DB.
+      ZO_EXT_AUTH_SALT: "${O2_EXT_AUTH_SALT:?set in .prod.env (openssl rand -hex 24), never change it afterwards}"
+      # OpenObserve's default retention is ~10 years; it deletes expired files from the bucket itself
+      # (no bucket lifecycle rules: the file list in Postgres would no longer match the bucket).
+      ZO_COMPACT_DATA_RETENTION_DAYS: ${O2_RETENTION_DAYS:-30}
+    ports:
+      - 127.0.0.1:5080:5080
+    volumes:
+      # WAL (data not yet uploaded to the bucket, up to ~20 minutes' worth) and caches only.
+      - openobserve-wal:/data
+    depends_on:
+      db-init: { condition: service_completed_successfully }
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: otel-collector
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol/config.yaml"]
+    environment:
+      ZO_ROOT_USER_EMAIL: ${ZO_ROOT_USER_EMAIL}
+      ZO_ROOT_USER_PASSWORD: ${ZO_ROOT_USER_PASSWORD}
+      O2_ORG: ${O2_ORG:-default}
+    ports:
+      # Gateway for every machine's agent: OTLP gRPC + mTLS (client certificate from scripts/pki.sh required).
+      # Local: 127.0.0.1. On the observer host set OTEL_GATEWAY_BIND=0.0.0.0 (open to any IP; the certificate is the key).
+      - ${OTEL_GATEWAY_BIND:-127.0.0.1}:4317:4317
+    volumes:
+      - ./otel-collector/config.yaml:/etc/otelcol/config.yaml:ro
+      - ./pki/gateway:/certs:ro # scripts/pki.sh gateway <ip|name> ...
+    # The OpenObserve image is distroless (no shell/curl for a healthcheck); this service retries until it is up.
+    depends_on: [openobserve]
+
+  provisioner:
+    # Every SYNC_INTERVAL s: OpenObserve's routing pipelines (one stream per service.namespace) and per-project retention
+    # (retention.json), Grafana dashboards + alert rules into the grafana-provisioning volume, and one OpenObserve
+    # "API Service" dashboard per traces stream (created / deleted with the stream; UI edits are reverted), and the machine
+    # inventory (table machine in the monitoring database: every machine seen, until retired from its Fleet Overview card).
+    build: ./provisioner
+    image: observability-provisioner
+    container_name: provisioner
+    restart: unless-stopped
+    environment:
+      <<: *pg_required
+      O2_URL: http://openobserve:5080/openobserve
+      O2_ORG: ${O2_ORG:-default}
+      ZO_ROOT_USER_EMAIL: ${ZO_ROOT_USER_EMAIL}
+      ZO_ROOT_USER_PASSWORD: ${ZO_ROOT_USER_PASSWORD}
+      SYNC_INTERVAL: ${DASHBOARD_SYNC_INTERVAL:-60}
+      # test only: ALERTS_MODE=test, or LINE_PUSH_URL=http://fake-line:8080/v2/bot/message/push (see AGENTS.md)
+      ALERTS_MODE: ${ALERTS_MODE:-prod}
+      LINE_PUSH_URL: ${LINE_PUSH_URL:-}
+      DIGEST_TIMES: ${DIGEST_TIMES:-05:00,17:00}  # scheduled digest, HH:MM in Asia/Taipei (gen_alerts.py)
+    volumes:
+      - ./provisioner:/provisioner:ro
+      - ./grafana/provisioning:/static:ro
+      - ./retention.json:/retention.json:ro
+      - grafana-provisioning:/out
+    healthcheck:
+      test: ["CMD", "test", "-f", "/out/.ready"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  # ---------------------------------------------------------------- Grafana: machines + services (status, thresholds, alerts)
+  # Grafana shows the Fleet Overview / Node Exporter Details dashboards and sends the LINE alerts. It reads metrics from
+  # OpenObserve's Prometheus-compatible API (no Prometheus of its own) and thresholds from the monitoring database.
+  # Its own state (users, alert state) is in the grafana database; the container keeps nothing but a plugin cache.
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    restart: unless-stopped
+    environment:
+      <<: *pg_required
+      GF_INSTALL_PLUGINS: marcusolsson-dynamictext-panel
+      # Served under /grafana (Caddy). Path only, no host: Grafana then works on any host the browser uses (verified 13.x).
+      GF_SERVER_ROOT_URL: /grafana/
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:?set in .env}"
+      GF_DATABASE_TYPE: postgres
+      GF_DATABASE_HOST: ${PG_HOST}:${PG_PORT:-5432}
+      GF_DATABASE_NAME: grafana
+      GF_DATABASE_USER: ${PG_USER}
+      GF_DATABASE_PASSWORD: ${PG_PASSWORD}
+      GF_DATABASE_SSL_MODE: ${PG_SSLMODE:-require}
+      # used by the provisioned OpenObserve datasource (basic auth) and the LINE contact points
+      ZO_ROOT_USER_EMAIL: ${ZO_ROOT_USER_EMAIL}
+      ZO_ROOT_USER_PASSWORD: ${ZO_ROOT_USER_PASSWORD}
+      O2_ORG: ${O2_ORG:-default}
+      LINE_CHANNEL_ACCESS_TOKEN: ${LINE_CHANNEL_ACCESS_TOKEN:-}
+      LINE_USER_ID: ${LINE_USER_ID:-}
+    ports:
+      - 127.0.0.1:13000:3000
+    volumes:
+      - grafana-plugins:/var/lib/grafana/plugins
+      - grafana-provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      db-init: { condition: service_completed_successfully }
+      provisioner: { condition: service_healthy }
+      openobserve: { condition: service_started }
+
+  caddy:
+    # The one web entry point: /grafana -> Grafana, /openobserve -> OpenObserve (caddy/Caddyfile). Listens on 127.0.0.1:80 only;
+    # on the observer host reach it through an SSH tunnel (`ssh -N -L 8080:127.0.0.1:80 <host>`) or Tailscale.
+    image: caddy:latest
+    container_name: caddy
+    restart: unless-stopped
+    ports:
+      - 127.0.0.1:80:80
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on: [grafana, openobserve]
+
+  postgres-exporter:
+    # Publishes the thresholds as metrics usage_threshold_warn / usage_threshold_crit{instance,resource} and the machine
+    # inventory as machine_registered{instance} (scraped by the collector), because Grafana alert rules cannot compare a
+    # PromQL series with a Postgres query.
+    image: quay.io/prometheuscommunity/postgres-exporter:latest
+    container_name: postgres-exporter
+    restart: unless-stopped
+    environment:
+      DATA_SOURCE_URI: ${PG_HOST}:${PG_PORT:-5432}/monitoring?sslmode=${PG_SSLMODE:-require}
+      DATA_SOURCE_USER: ${PG_USER}
+      DATA_SOURCE_PASS: ${PG_PASSWORD}
+    volumes:
+      - ./postgres-exporter/queries.yaml:/queries.yaml:ro
+    command: ["--extend.query-path=/queries.yaml", "--disable-default-metrics"]
+    depends_on:
+      db-init: { condition: service_completed_successfully }
+
+  blackbox-exporter:
+    # HTTP checks of the services (only HTTP 200 counts as up), scraped once a minute by the collector.
+    image: prom/blackbox-exporter:latest
+    container_name: blackbox-exporter
+    restart: unless-stopped
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    volumes:
+      - ./blackbox/blackbox.yml:/etc/blackbox_exporter/config.yml:ro
+
+volumes:
+  openobserve-wal:
+  grafana-plugins:
+  grafana-provisioning:

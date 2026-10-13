@@ -1,0 +1,145 @@
+# OpenTelemetry Collector, gateway role: the single entry point for every machine's agent (agent/), and the only thing
+# that talks to OpenObserve (apps and agents never hold OpenObserve credentials).
+# Agents connect with OTLP gRPC on :4317 and must present a client certificate signed by our CA (mTLS, scripts/pki.sh):
+# that is both the encryption and the authentication. Each agent sends its machine's metrics, traces and logs; the gateway
+# itself only scrapes what lives on the observer (service probes, thresholds).
+# It is also where this stack protects itself: whatever a service sends, the limits below (request size,
+# attribute count/length, scrape size, memory) keep one noisy or broken service from filling OpenObserve.
+#   traces, logs : OTLP from agents -> OpenObserve stream "ingest" -> OpenObserve pipelines move each record to the stream named
+#                  after its service.namespace (the project; created on first data). Missing namespace -> "default".
+#   metrics      : OTLP from agents (node_exporter) + blackbox probes + threshold exporter -> Prometheus remote write -> OpenObserve
+#                  (PromQL names/labels kept as-is; Grafana reads them back through OpenObserve's Prometheus API)
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  basicauth/openobserve:
+    client_auth:
+      username: ${env:ZO_ROOT_USER_EMAIL}
+      password: ${env:ZO_ROOT_USER_PASSWORD}
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+        max_recv_msg_size_mib: 4 # bigger export requests are refused
+        tls:
+          cert_file: /certs/gateway.crt
+          key_file: /certs/gateway.key
+          client_ca_file: /certs/ca.crt # set = a client certificate from this CA is required (mTLS)
+
+  prometheus:
+    config:
+      scrape_configs:
+        # Label conventions: `service_namespace` (OpenTelemetry's service.namespace = the project) on every target,
+        # `service` on blackbox targets.
+        # Machines are not scraped here: each machine's agent scrapes its own node_exporter and pushes the metrics.
+        # Services: HTTP 200 from the probed URL = up. Probed once a minute; the Service DOWN alert needs 5 failures in a row.
+        - job_name: blackbox
+          scrape_interval: 1m
+          metrics_path: /probe
+          params:
+            module: [http_200]
+          static_configs:
+            - targets: ["http://host.docker.internal:3000/login"]
+              labels:
+                service_namespace: sclaser_food
+                service: sclaser-food
+          relabel_configs:
+            - source_labels: [__address__]
+              target_label: __param_target
+            - source_labels: [__param_target]
+              target_label: instance
+            - target_label: __address__
+              replacement: blackbox-exporter:9115
+
+        # Thresholds from the monitoring database, as usage_threshold_warn / usage_threshold_crit{instance,resource}.
+        # honor_labels: the exporter's instance label (a machine's name or "*") wins over the scrape address.
+        - job_name: thresholds
+          scrape_interval: 15s
+          honor_labels: true
+          static_configs:
+            - targets: ["postgres-exporter:9187"]
+          # Only the thresholds and the machine inventory: the exporter also reports hundreds of Postgres internals (pg_settings_*, pg_stat_*, ...)
+          # that --disable-default-metrics does not cover, and each would become an OpenObserve stream.
+          metric_relabel_configs:
+            - source_labels: [__name__]
+              regex: "usage_threshold_.*|machine_registered"
+              action: keep
+
+processors:
+  memory_limiter: # refuses new data (apps retry) instead of the collector running out of memory
+    check_interval: 1s
+    limit_mib: 400
+    spike_limit_mib: 100
+
+  # Per-record caps. OpenObserve turns every attribute into a column (max 1000 per record) and stores
+  # values as-is, so an app logging huge payloads or thousands of keys would bloat every query.
+  transform/limits:
+    error_mode: ignore
+    # One group per context: a single flat list runs in the lowest context it mentions (e.g. per span
+    # event), so span rules would silently skip spans without events.
+    trace_statements:
+      - statements:
+          - limit(resource.attributes, 64, [])
+          - truncate_all(resource.attributes, 4096)
+      - statements:
+          - limit(span.attributes, 128, [])
+          - truncate_all(span.attributes, 32768)
+      - statements:
+          - limit(spanevent.attributes, 64, [])
+          - truncate_all(spanevent.attributes, 32768)
+    log_statements:
+      - statements:
+          - limit(resource.attributes, 64, [])
+          - truncate_all(resource.attributes, 4096)
+      - statements:
+          - limit(log.attributes, 128, [])
+          - truncate_all(log.attributes, 32768)
+          - set(log.body, Substring(log.body, 0, 32768)) where IsString(log.body) and Len(log.body) > 32768
+
+  # Project = OpenTelemetry's service.namespace; it becomes the OpenObserve stream name, so it is always present (apps and
+  # agents that set none -> "default") and limited to characters a stream name can hold (anything else -> "_").
+  transform/namespace:
+    error_mode: ignore
+    trace_statements:
+      - statements: &namespace
+          - set(resource.attributes["service.namespace"], "default") where resource.attributes["service.namespace"] == nil or resource.attributes["service.namespace"] == ""
+          - replace_pattern(resource.attributes["service.namespace"], "[^a-zA-Z0-9_]", "_")
+    log_statements:
+      - statements: *namespace
+
+  batch: {}
+
+# ---------------------------------------------------------------- one OpenObserve stream per project
+# Traces and logs all go to the stream "ingest". Two OpenObserve pipelines (created and kept in place by the provisioner,
+# provisioner/provision.py) move every record to the stream named after its service.namespace; that stream is created on
+# its first record, so a new project needs no change here. Retention per stream: retention.json.
+exporters:
+  otlphttp/openobserve:
+    endpoint: http://openobserve:5080/openobserve/api/${env:O2_ORG} # /openobserve: ZO_BASE_URI
+    auth:
+      authenticator: basicauth/openobserve
+    headers:
+      stream-name: ingest
+
+  prometheusremotewrite/openobserve:
+    endpoint: http://openobserve:5080/openobserve/api/${env:O2_ORG}/prometheus/api/v1/write
+    auth:
+      authenticator: basicauth/openobserve
+
+service:
+  extensions: [health_check, basicauth/openobserve]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, transform/limits, transform/namespace, batch]
+      exporters: [otlphttp/openobserve]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, transform/limits, transform/namespace, batch]
+      exporters: [otlphttp/openobserve]
+    metrics:
+      receivers: [otlp, prometheus]
+      processors: [memory_limiter, batch]
+      exporters: [prometheusremotewrite/openobserve]

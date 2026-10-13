@@ -1,0 +1,17 @@
+# Usage thresholds, edited from the Fleet Overview cards (database monitoring, table usage_threshold, see db/init.sql).
+# Same Postgres server as OpenObserve and Grafana itself; connection from the container env (.local.env or .prod.env).
+apiVersion: 1
+
+datasources:
+  - name: Thresholds DB
+    uid: thresholds-db
+    type: grafana-postgresql-datasource
+    access: proxy
+    url: ${PG_HOST}:${PG_PORT}
+    user: ${PG_USER}
+    secureJsonData:
+      password: ${PG_PASSWORD}
+    jsonData:
+      database: monitoring
+      sslmode: ${PG_SSLMODE}
+      postgresVersion: 1700

@@ -1,0 +1,35 @@
+# Exposes the usage_threshold table as Prometheus metrics:
+#   usage_threshold_warn{instance,resource}   usage_threshold_crit{instance,resource}
+# instance = the machine's instance label (its host.name), or "*" for the default row. Kept as is by the collector
+# (honor_labels), so alert rules compare these series with the machines' without relabeling: in OpenObserve (v1.0.4)
+# series that went through label_replace / label_join copies no longer match in or / unless / comparisons.
+usage_threshold:
+  query: "SELECT instance, resource, warn, crit FROM usage_threshold"
+  metrics:
+    - instance:
+        usage: "LABEL"
+        description: "instance label (host.name) of the machine, or * for the default row"
+    - resource:
+        usage: "LABEL"
+        description: "cpu, memory or disk"
+    - warn:
+        usage: "GAUGE"
+        description: "warn threshold in percent"
+    - crit:
+        usage: "GAUGE"
+        description: "crit threshold in percent"
+
+# The machine inventory (table machine) as machine_registered{instance,service_namespace} = 1: alert rules and Fleet Overview
+# compare it with the machines' own metrics to find a machine that stopped sending (agents push; silence is not "0").
+machine:
+  query: "SELECT instance, service_namespace, 1 AS registered FROM machine"
+  metrics:
+    - instance:
+        usage: "LABEL"
+        description: "host.name of the machine"
+    - service_namespace:
+        usage: "LABEL"
+        description: "project of the machine when it was last seen"
+    - registered:
+        usage: "GAUGE"
+        description: "always 1"
