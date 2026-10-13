@@ -2,7 +2,7 @@
 # with the storage settings (O2_S3_*, PG_*, O2_EXT_AUTH_SALT) from .local.env / .prod.env.
 #   - OpenObserve stores everything (metrics, logs, traces): data in an S3-API bucket, metadata in Postgres.
 #   - Apps send OTLP traces/logs to the collector (127.0.0.1:4317 gRPC / 127.0.0.1:4318 HTTP); the collector also
-#     scrapes node_exporter, blackbox and postgres-exporter and remote-writes the metrics to OpenObserve.
+#     scrapes postgres-exporter (thresholds) and remote-writes the metrics to OpenObserve.
 #   - Grafana: machine / service dashboards, thresholds and LINE alerts, reading metrics from OpenObserve.
 #   - One Postgres server, three databases (db/init.sql): openobserve, grafana, monitoring (thresholds).
 #   - Dashboards and alert rules are generated at runtime by the provisioner, never stored in the repo.
@@ -190,16 +190,6 @@ services:
     command: ["--extend.query-path=/queries.yaml", "--disable-default-metrics"]
     depends_on:
       db-init: { condition: service_completed_successfully }
-
-  blackbox-exporter:
-    # HTTP checks of the services (only HTTP 200 counts as up), scraped once a minute by the collector.
-    image: prom/blackbox-exporter:latest
-    container_name: blackbox-exporter
-    restart: unless-stopped
-    extra_hosts:
-      - host.docker.internal:host-gateway
-    volumes:
-      - ./blackbox/blackbox.yml:/etc/blackbox_exporter/config.yml:ro
 
 volumes:
   openobserve-wal:

@@ -8,7 +8,7 @@
 | 規則 | 條件 | 等多久才通知 | 備註 |
 |---|---|---|---|
 | 機器沒有回應 Machine DOWN | `up{job="node"} == 0` | 4 分鐘 = 連續 5 次 | GCP 上是 1 分鐘；owner 要求和 Service DOWN 一樣 |
-| 服務沒有回應 Service DOWN | `probe_success == 0`（blackbox，只有 HTTP 200 算正常） | 4 分鐘 = 連續 5 次探測失敗 | owner 要求寬鬆：外部網站短暫失敗不吵人 |
+| ~~服務沒有回應 Service DOWN~~ | `probe_success == 0`（blackbox，只有 HTTP 200 算正常） | 4 分鐘 = 連續 5 次探測失敗 | **已移除（2026-10-13）**：observer 改成純 push，不再探測服務 |
 | 用量超過 WARN | CPU / 記憶體 / 磁碟 `/` ≥ warn 門檻，且**還沒到** crit | 2 分鐘 | 到 crit 時只發 CRIT，不會兩則都發 |
 | 用量超過 CRIT | ≥ crit 門檻 | 2 分鐘 | |
 | 門檻資料讀不到 | `absent(usage_threshold_warn{machine="*"})` | 1 分鐘 | 監控「告警自己的依賴」壞掉 |
@@ -29,8 +29,8 @@
 | 項目 | 做法 |
 |---|---|
 | 機器顯示名稱 | GCP 上：每台機器用 textfile collector 發布 `provider_instance_name_info{name,provider}`，儀表板依序 fallback 到 hostname、instance（所以只改 instance 時卡片名稱不變）。這裡：agent 把 `instance` 設成 `host.name`（`HOST_NAME`），卡片直接顯示它，textfile 已移除 |
-| Label 慣例 | GCP 上每個 target 都有 `project`；這裡改用 OpenTelemetry 標準的 `service_namespace`（見 AGENTS.md 的 Projects）；blackbox 另有 `service` |
-| HTTP 存活探測 | blackbox-exporter，只有 200 算正常 |
+| Label 慣例 | GCP 上每個 target 都有 `project`；這裡改用 OpenTelemetry 標準的 `service_namespace`（見 AGENTS.md 的 Projects）（GCP 上 blackbox 另有 `service`，已隨服務探測移除） |
+| HTTP 存活探測 | GCP 上用 blackbox-exporter（只有 200 算正常）；**這裡已移除**：純 push，observer 不探測 |
 | 只聽 127.0.0.1 | 沿用；GCP 上用 Caddy 依路徑分流 + SSH tunnel，本機不需要 Caddy |
 | 儀表板 | UI 不能存（`allowUiUpdates: false`），由 generator 產生；這裡更進一步：產生的檔案不進 repo，由 `provisioner` 在執行時產生 |
 | Fleet Overview | Business Text 外掛：每台機器一張卡片、依門檻變色、卡片上直接改門檻 |

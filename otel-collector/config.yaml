@@ -2,12 +2,12 @@
 # that talks to OpenObserve (apps and agents never hold OpenObserve credentials).
 # Agents connect with OTLP gRPC on :4317 and must present a client certificate signed by our CA (mTLS, scripts/pki.sh):
 # that is both the encryption and the authentication. Each agent sends its machine's metrics, traces and logs; the gateway
-# itself only scrapes what lives on the observer (service probes, thresholds).
+# itself only scrapes what lives on the observer (thresholds, machine inventory). Nothing is probed from here: pure push.
 # It is also where this stack protects itself: whatever a service sends, the limits below (request size,
 # attribute count/length, scrape size, memory) keep one noisy or broken service from filling OpenObserve.
 #   traces, logs : OTLP from agents -> OpenObserve stream "ingest" -> OpenObserve pipelines move each record to the stream named
 #                  after its service.namespace (the project; created on first data). Missing namespace -> "default".
-#   metrics      : OTLP from agents (node_exporter) + blackbox probes + threshold exporter -> Prometheus remote write -> OpenObserve
+#   metrics      : OTLP from agents (node_exporter) + threshold exporter -> Prometheus remote write -> OpenObserve
 #                  (PromQL names/labels kept as-is; Grafana reads them back through OpenObserve's Prometheus API)
 extensions:
   health_check:
@@ -31,27 +31,8 @@ receivers:
   prometheus:
     config:
       scrape_configs:
-        # Label conventions: `service_namespace` (OpenTelemetry's service.namespace = the project) on every target,
-        # `service` on blackbox targets.
-        # Machines are not scraped here: each machine's agent scrapes its own node_exporter and pushes the metrics.
-        # Services: HTTP 200 from the probed URL = up. Probed once a minute; the Service DOWN alert needs 5 failures in a row.
-        - job_name: blackbox
-          scrape_interval: 1m
-          metrics_path: /probe
-          params:
-            module: [http_200]
-          static_configs:
-            - targets: ["http://host.docker.internal:3000/login"]
-              labels:
-                service_namespace: sclaser_food
-                service: sclaser-food
-          relabel_configs:
-            - source_labels: [__address__]
-              target_label: __param_target
-            - source_labels: [__param_target]
-              target_label: instance
-            - target_label: __address__
-              replacement: blackbox-exporter:9115
+        # Machines are not scraped here: each machine's agent scrapes its own node_exporter and pushes the metrics
+        # (label `service_namespace` = the project). No service probes either (owner, 2026-10-13: pure push).
 
         # Thresholds from the monitoring database, as usage_threshold_warn / usage_threshold_crit{instance,resource}.
         # honor_labels: the exporter's instance label (a machine's name or "*") wins over the scrape address.

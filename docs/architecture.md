@@ -3,6 +3,7 @@
 兩種角色的主機：
 - **被監控的機器**（API VM，這台 Mac 也算一台）：每台跑一個 agent。app 的 traces / logs 和 node_exporter 的機器狀態都只送到本機的 agent，由 agent 統一推到 observer。
 - **observer host**：唯一入口是 gateway（:4317，OTLP gRPC + mTLS，只接受我們 CA 簽發的 client 憑證）。新增機器不用改 observer。
+  純 push：observer 不主動連任何機器或服務（沒有 scrape、沒有 HTTP 探測），機器停了 = 收不到它的資料（見 Machine DOWN）。
 
 local 和 prod 是同一套設計、同類型的服務，只差在 Bucket 和 Postgres 由誰提供（local：RustFS / Postgres 容器；prod：GCS / Cloud SQL 等），由 env 決定（`.local.env` / `.prod.env`），分別用 `docker-compose.local.yml` / `docker-compose.prod.yml` 啟動。
 
@@ -23,9 +24,7 @@ flowchart LR
         gwcert[/"gateway 憑證 + CA<br/>scripts/pki.sh gateway IP"/]
         gwcert -.- gateway
 
-        blackbox["blackbox-exporter"]
         pgexp["postgres-exporter"]
-        gateway -->|"scrape"| blackbox
         gateway -->|"scrape"| pgexp
 
         o2["OpenObserve<br/>儲存 + logs / traces 查詢"]
@@ -42,7 +41,7 @@ flowchart LR
         o2 --> db_o2
         pgexp -->|"門檻、機器清單 → metrics"| db_m
 
-        grafana["Grafana<br/>機器 / 服務狀態 · 門檻 · 告警"]
+        grafana["Grafana<br/>機器狀態 · 門檻 · 告警"]
         grafana -->|"PromQL（Prometheus 相容 API）"| o2
         grafana -->|"✎ 讀寫門檻 · Retire 退役機器"| db_m
         grafana --> db_g
@@ -54,7 +53,6 @@ flowchart LR
     end
 
     agent ==>|"OTLP gRPC :4317 · mTLS<br/>metrics + traces + logs"| gateway
-    blackbox -->|"每分鐘 HTTP 探測"| app
 
     bucket[("Bucket（S3 API）<br/>parquet 資料")]
     o2 -->|"WAL → parquet 上傳"| bucket

@@ -73,7 +73,7 @@ for p in walk(d["panels"]):
 # A machine's instance label is its name (host.name, set by its agent), so the dropdown shows it as is.
 for v in d["templating"]["list"]:
     if v["name"] == "job":
-        q = 'label_values(up{job!="blackbox"}, job)'
+        q = 'label_values(up{job="node"}, job)'  # machines (agents' node_exporter scrape), not the gateway's own jobs
         v["definition"] = q
         v["query"] = {"query": q, "refId": "Prometheus-job-Variable-Query"}
     elif v["name"] == "node":

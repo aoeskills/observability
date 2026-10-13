@@ -29,7 +29,7 @@ reference only — see `docs/takeaways-from-grafana.md`. The owner writes Chines
 | `docker-compose.prod.yml` | prod mode (observer host): includes `docker-compose.yml` with env `.prod.env` (copy `.prod.env.example`, gitignored) |
 | `.env` / `.local.env` / `.prod.env` | shared secrets (root, Grafana, LINE) / local storage settings (dev-only, committed) / prod storage settings |
 | `db/init.sql` | run by `db-init` on every start: creates databases `openobserve`, `grafana`, `monitoring` and table `usage_threshold` if missing |
-| `otel-collector/config.yaml` | the gateway: OTLP gRPC + mTLS from agents → OpenObserve stream `ingest` (pipelines move it to one stream per `service.namespace`); scrapes blackbox, postgres-exporter → Prometheus remote write → OpenObserve |
+| `otel-collector/config.yaml` | the gateway: OTLP gRPC + mTLS from agents → OpenObserve stream `ingest` (pipelines move it to one stream per `service.namespace`); scrapes postgres-exporter (thresholds, machine inventory) → Prometheus remote write → OpenObserve |
 | `retention.json` | days OpenObserve keeps each project's traces / logs (`sclaser_food`: 90); unlisted projects use `O2_RETENTION_DAYS` |
 | `agent/` | the per-machine agent (compose + config + `.env.example`; `docker-compose.mac.yml` for this Mac): apps' OTLP + local node_exporter → gateway |
 | `scripts/pki.sh` | private CA, gateway certificate, one client certificate per machine → `pki/` (gitignored) |
@@ -37,7 +37,7 @@ reference only — see `docs/takeaways-from-grafana.md`. The owner writes Chines
 | `provisioner/openobserve_dashboards.py` | OpenObserve "API Service" dashboard for one stream (SQL over traces / logs) |
 | `provisioner/grafana/` | Grafana generators ported from the GCP stack (`gen_fleet_overview.py`, `gen_node_details.py` + stock `node-exporter-full-1860.json`, `gen_alerts.py`), `o2_links.py` |
 | `grafana/provisioning/` | the static part of Grafana's provisioning (datasources, dashboard provider); the provisioner copies it next to the generated files |
-| `postgres-exporter/queries.yaml`, `blackbox/blackbox.yml` | thresholds → metrics, service probes |
+| `postgres-exporter/queries.yaml` | thresholds + machine inventory → metrics |
 | `node-exporter/` | flags for this Mac's brew service (`scripts/setup-node-exporter-macos.sh`); Linux VMs run node_exporter from `agent/` |
 | `docs/agent-runbook.md` | adding a new VM (certificate, `agent/.env`, apps, checks, troubleshooting, rename / remove) |
 | `tools/fake_line_server.py` | stand-in for the LINE push API, for alert tests |
@@ -45,7 +45,7 @@ reference only — see `docs/takeaways-from-grafana.md`. The owner writes Chines
 ## Data model (what queries can rely on)
 - **Metrics**: Prometheus names and labels are kept (remote write), so PromQL from the old stack works. Every metric name is
   its own OpenObserve stream, which is why the collector drops metrics nobody uses (exporters' `go_*`, postgres-exporter's
-  `pg_*`). Labels: `job`, `instance`, `service_namespace` (the project, see "Projects"; and `service` on blackbox targets). For machines `instance` is the
+  `pg_*`). Labels: `job`, `instance`, `service_namespace` (the project, see "Projects"). For machines `instance` is the
   machine name = OpenTelemetry `host.name`, detected by the agent (resourcedetection, re-run every minute: `HOST_NAME` in
   `agent/.env` if set > GCP instance name > OS hostname), also in label `host_name`; traces / logs carry the same
   `host.name` (OpenObserve `service_host_name` / `host_name`). Only the certificate's name stays fixed. Owner's requirement
@@ -120,12 +120,12 @@ One name end to end: OpenTelemetry's resource attribute **`service.namespace`** 
   both; an API edit of the dashboard was reverted on the next pass.
 
 ## Grafana: machines, services, thresholds, alerts
-Split decided by the owner (2026-10-12): Grafana for machine/service status, thresholds and LINE alerts (the GCP design, ported);
+Split decided by the owner (2026-10-12): Grafana for machine status, thresholds and LINE alerts (the GCP design, ported);
 OpenObserve for storage and logs/traces. Grafana has **no Prometheus of its own**: its datasource `openobserve` is
 OpenObserve's Prometheus-compatible API (`/api/default/prometheus`, basic auth from `.env`).
 - Generators in `provisioner/grafana/` are the GCP ones with these changes: `round(x, 0.1)` → `round(x * 10) / 10` (OpenObserve
   rejects the 2-arg form), macOS memory branch (`or (active + wired + compressed) / total`), Grafana served at `/grafana` behind Caddy as on GCP
-  (`caddy/Caddyfile`, `GF_SERVER_SERVE_FROM_SUB_PATH`), datasource uid `openobserve`, machine-down pending 4m like service-down (owner: both "every minute, 5 in a row").
+  (`caddy/Caddyfile`, `GF_SERVER_SERVE_FROM_SUB_PATH`), datasource uid `openobserve`, machine-down pending 4m (owner: "every minute, 5 in a row").
 - OpenObserve's Prometheus API: `label/<name>/values` needs `match[]` (Grafana sends it when the variable query names a
   metric), no `status/buildinfo` (harmless). Tested: label_replace, label_join, group_left, `^ 0`, last_over_time, absent, unless
   (see the label_replace / set-operation quirks under "OpenObserve gotchas").
@@ -148,8 +148,8 @@ OpenObserve's Prometheus-compatible API (`/api/default/prometheus`, basic auth f
 - Test without LINE: run `fake-line` (see `tools/fake_line_server.py`), then
   `LINE_PUSH_URL=http://fake-line:8080/v2/bot/message/push docker compose -f docker-compose.local.yml up -d --wait provisioner` and
   `docker compose -f docker-compose.local.yml restart grafana`; afterwards the same without `LINE_PUSH_URL`. `ALERTS_MODE=test` instead gives
-  1-minute timers and a fake token. Verified 2026-10-12 (before the move to runtime generation): Service DOWN fires after
-  5 failed probes, "已恢復" ~5 min after recovery (group_interval).
+  1-minute timers and a fake token. Verified 2026-10-12 (before the move to runtime generation): the (since removed) Service DOWN
+  fired after 5 failed probes, "已恢復" ~5 min after recovery (group_interval).
 - **Digest** (owner, 2026-10-13: at start + 05:00 / 17:00 UTC+8, was every 12 h from Grafana's start): Alertmanager has no cron,
   so two routes match `digest=all`. Startup route: group_wait 1m, never repeats; the heartbeat carries label `started` = the
   provisioner's start time, because Grafana keeps its notification log in Postgres and would otherwise treat the same alert set
@@ -163,6 +163,9 @@ OpenObserve's Prometheus-compatible API (`/api/default/prometheus`, basic auth f
 ## Agent + gateway (mTLS)
 Owner's decision (2026-10-13): every machine pushes everything (node_exporter metrics, apps' traces and logs) through one agent;
 the observer exposes one entry point and needs no change when a machine is added. OpenTelemetry's agent + gateway pattern.
+- **Pure push** (owner, 2026-10-13): the observer never connects to a machine or service. The GCP-era blackbox service
+  probes (Service DOWN, Fleet Overview "Services") were removed: they could only reach what the observer reaches. A dead
+  machine is detected by silence (Machine DOWN); a service's health is in its traces / logs in OpenObserve.
 - **Gateway** (`otel-collector`): OTLP gRPC :4317 only, TLS with `client_ca_file` = a client certificate signed by our CA is
   required. Bound to `${OTEL_GATEWAY_BIND:-127.0.0.1}`; on the observer set `0.0.0.0` (open to any IP). Certificates from
   `pki/gateway/` (SANs = every IP / name agents dial: locally `host.docker.internal`; remote the observer's public IP).
@@ -235,8 +238,6 @@ Checked against the old stack's AGENTS.md (`~/monitoring` on that VM); decide th
   `ssh -N -L 8080:127.0.0.1:80 GCP_aoeskills`, or Tailscale (`tailscale serve` on the VM forwards tailnet :80 to 127.0.0.1:80).
   Old Caddy also binds 80 there: stop the old stack first.
 - **host.name from GCP**: check on the VM that the agent detects the instance name (`aoeskills-first-host`; leave HOST_NAME unset).
-- **Service probes**: blackbox targets are the Mac's `host.docker.internal:3000/login`; the old stack also probed
-  `https://github.com/aoeskills` (project GCP_aoeskills). Set the targets for the VM.
 - Old stack also scraped the sclaser VM at `34.104.203.72:9100` (node_exporter reachable from outside); when that VM gets an
   agent, close 9100 there.
 - Not verified yet: LINE delivery with real credentials (`.env` empty), GCS / Cloud SQL, the agent's node-exporter on a real
