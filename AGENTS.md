@@ -159,6 +159,9 @@ OpenObserve's Prometheus-compatible API (`/api/default/prometheus`, basic auth f
   re-registered). Both read `machine_registered` over `[1m]` so a retire shows within a minute. Verified 2026-10-13: agent
   stopped → DOWN card in 1 min, alert firing after ~6 min; Retire via the button's SQL → card + alert gone in 1 min; agent
   started → registered again, UP.
+  Usage cards (CPU / Memory / Disk) show a value only while the machine is UP; otherwise they say "No data" (owner,
+  2026-10-14). Before, CPU (a rate: needs two samples in its 5 min) vanished after an agent start / stop while Memory /
+  Disk kept the last sample for 5 minutes. Checked 2026-10-14 against the VM's data at test instants (query results only).
 - **Service inventory**, the same design (owner, 2026-10-13: services are pushed too, so they get the same treatment): the
   provisioner upserts every `(instance, service)` with a `probe_success` in the last 2 minutes into `monitoring.service`
   (exported as `service_registered{instance,service,service_namespace}`). Service DOWN = registered without a

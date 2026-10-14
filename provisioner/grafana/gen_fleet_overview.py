@@ -62,8 +62,24 @@ STATUS_SERIES = STATUS
 for _label, _val in (("metric", "Status"), ("order", "0"), ("resource", "status")):
     STATUS_SERIES = f'label_replace({STATUS_SERIES}, "{_label}", "{_val}", "", "")'
 
-UNION = "\n or ".join([STATUS_SERIES, card_series(CPU, "CPU", 1, "cpu"), card_series(MEM, "Memory", 2, "memory"),
-                       card_series(DISK, "Disk /", 3, "disk")])
+# Usage cards show a value only while the machine is UP (an up == 1 sample in the last minute). Otherwise every card of a
+# machine with a Status card says "No data" instead of disappearing: CPU is a rate and needs two samples in its 5 minutes
+# (gone ~15 s after an agent starts and until it has run a while), while Memory / Disk are plain values that would keep
+# showing the last sample for 5 minutes after the machine stopped. Every side is reduced to the same labels (`or` /
+# `unless` match whole label sets in OpenObserve) and gets `+ 0` (an empty side would empty the result).
+KEY = "instance,job,service_namespace"
+UP_NOW = f'max by({KEY})({LIVE} == 1)'
+MACHINES = f'(max by({KEY})(({LIVE} + 0) or {SILENT}) + 0)'
+
+
+def usage_cards(expr, metric, order, resource):
+    value = f'(max by({KEY})({expr}) * {UP_NOW})'
+    nodata = f'label_replace(({MACHINES} unless ({value} + 0)) * 0, "nodata", "1", "", "")'
+    return [card_series(value, metric, order, resource), card_series(nodata, metric, order, resource)]
+
+
+UNION = "\n or ".join([STATUS_SERIES, *usage_cards(CPU, "CPU", 1, "cpu"), *usage_cards(MEM, "Memory", 2, "memory"),
+                       *usage_cards(DISK, "Disk /", 3, "disk")])
 MACHINE_PROM = f'label_join(\n{UNION}\n, "key", "|", "instance", "resource")'
 
 # thresholds for every machine Prometheus currently knows: own row if present, else the '*' default row
@@ -118,12 +134,15 @@ CSS = """
 .card[data-state="crit"] .bar i{background:#d93636}
 .card[data-state="crit"] .value{color:#d93636}
 .card[data-state="ok"]{border-left-color:#1f9d55}
+.nodata{display:none;font-size:20px;font-weight:600;line-height:30px;opacity:.6}
+.card[data-nodata="1"] .nodata{display:block}
+.card[data-nodata="1"] .value,.card[data-nodata="1"] .bar{display:none}
 .labels{display:flex;flex-wrap:wrap;gap:4px}
 .chip{font-size:11px;padding:1px 8px;border-radius:10px;background:rgba(128,128,128,.25);word-break:break-all}
 .chip b{font-weight:600;opacity:.75}
 .chip[data-k="Time"],.chip[data-k="Value"],.chip[data-k="metric"],.chip[data-k="order"],.chip[data-k="key"],
 .chip[data-k="warn"],.chip[data-k="crit"],.chip[data-k="is_default"],.chip[data-k="resource"],.chip[data-k="__name__"],
-.chip[data-k="name"],.chip[data-k="host_name"],.chip[data-k="otel_scope_name"],.chip[data-k="otel_scope_version"]{display:none}
+.chip[data-k="name"],.chip[data-k="host_name"],.chip[data-k="nodata"],.chip[data-k="otel_scope_name"],.chip[data-k="otel_scope_version"]{display:none}
 .statusrow{display:none}
 .card[data-resource="status"] .statusrow{display:block}
 .card[data-resource="status"] .value,.card[data-resource="status"] .bar,.card[data-resource="status"] .thr,.card[data-resource="status"] .btn[data-action="edit"]{display:none}
@@ -144,11 +163,12 @@ CSS = """
 MACHINE_HTML = """<div class="toolbar"><button class="btn" data-action="defaults" title="Thresholds used by machines that have no values of their own">&#9881; Default thresholds</button></div>
 <div class="cards">
 {{#each data}}
-<div class="card" data-instance="{{instance}}" data-resource="{{resource}}" data-name="{{name}}" data-metric="{{metric}}" data-value="{{Value}}" data-up="{{Value}}" data-warn="{{warn}}" data-crit="{{crit}}" data-default="{{is_default}}">
+<div class="card" data-instance="{{instance}}" data-resource="{{resource}}" data-name="{{name}}" data-metric="{{metric}}" data-value="{{Value}}" data-up="{{Value}}" data-warn="{{warn}}" data-crit="{{crit}}" data-default="{{is_default}}" data-nodata="{{nodata}}">
   <a class="stretch" href="__SUB__/d/node-exporter-details?orgId=1&var-job={{job}}&var-node={{instance}}" title="Open {{name}} in Node Exporter Details" aria-label="Open {{name}} in Node Exporter Details"></a>
   <div class="head"><span class="name">{{name}} {{metric}}</span><button class="btn" data-action="edit">&#9998; Edit</button><button class="btn" data-action="retire" title="Remove this machine from monitoring: no more DOWN card or alert; deletes its own thresholds">Retire</button></div>
   <div class="statusrow"><span class="pill up">UP</span><span class="pill down">DOWN</span></div>
   <div class="value">{{Value}}<small>%</small></div>
+  <div class="nodata" title="No sample from this machine in the last minute (CPU: fewer than two in the last 5 minutes)">No data</div>
   <div class="bar"><i style="width:{{Value}}%"></i><b class="mk" style="left:{{warn}}%"></b><b class="mk" style="left:{{crit}}%"></b></div>
   <div class="thr">warn &ge; {{warn}}% &middot; crit &ge; {{crit}}%<span class="tag">default</span></div>
   <div class="labels">{{#each this}}<span class="chip" data-k="{{@key}}"><b>{{@key}}</b>:{{this}}</span>{{/each}}</div>
@@ -205,7 +225,7 @@ const LABEL = {cpu: 'CPU', memory: 'Memory', disk: 'Disk /'};
 // colour each card by comparing value with its thresholds
 el.querySelectorAll('.card[data-resource]').forEach(c => {
   const v = parseFloat(c.dataset.value), w = parseFloat(c.dataset.warn), k = parseFloat(c.dataset.crit);
-  c.dataset.state = (isNaN(v) || isNaN(w) || isNaN(k)) ? 'unknown' : (v >= k ? 'crit' : (v >= w ? 'warn' : 'ok'));
+  c.dataset.state = c.dataset.nodata === '1' ? 'unknown' : (isNaN(v) || isNaN(w) || isNaN(k)) ? 'unknown' : (v >= k ? 'crit' : (v >= w ? 'warn' : 'ok'));
 });
 
 if (!document.getElementById('thr-modal-style')) {
