@@ -4,9 +4,10 @@
 provisioner/provision.py writes it to the provisioning volume; ALERTS_MODE picks the mode.
 
 usage: gen_alerts.py prod|test
- - one LINE message the moment a problem starts (and one when it recovers)
- - a digest message when the stack starts and at DIGEST_TIMES (05:00 / 17:00 Asia/Taipei) that ALWAYS goes out: lists
-   what is wrong, or says everything is fine (a heartbeat alert that is always firing keeps the digest groups alive)
+ - one LINE message the moment a problem starts (and one when it recovers); for usage only CRIT
+ - a digest message 3 minutes after the stack starts and at DIGEST_TIMES (05:00 / 17:00 Asia/Taipei) that ALWAYS goes
+   out: what is wrong now, or that everything is fine (a heartbeat alert that is always firing keeps the digest groups
+   alive), then the last 12 hours: machine / service downtime and minutes over the usage thresholds (WARN lives here)
 Thresholds come from PostgreSQL via postgres-exporter (usage_threshold_warn / usage_threshold_crit):
 a machine's own row wins, otherwise the default row (instance="*").
 """
@@ -28,9 +29,9 @@ else:
     LINE_TOKEN, LINE_TO = "$LINE_CHANNEL_ACCESS_TOKEN", "$LINE_USER_ID"
 
 if MODE == "test":   # short timers so a test run finishes in a few minutes
-    T = dict(imm_wait="10s", imm_int="1m", imm_rep="8760h", start_wait="20s", every="1m", pend="1m", pend_usage="1m", pend_down="1m")
+    T = dict(imm_wait="10s", imm_int="1m", imm_rep="8760h", every="1m", pend="1m", pend_usage="1m", pend_down="1m")
 else:
-    T = dict(imm_wait="30s", imm_int="5m", imm_rep="8760h", start_wait="1m", every="1m", pend="1m", pend_usage="2m", pend_down="4m")
+    T = dict(imm_wait="30s", imm_int="5m", imm_rep="8760h", every="1m", pend="1m", pend_usage="2m", pend_down="4m")
     # pend_down (machine and service DOWN): rules are evaluated every 1m and the agents probe services every 1m, so pending
     # 4m = 5 bad evaluations in a row (owner: "every minute, 5 in a row"). A short hiccup does not page the owner.
 
@@ -42,8 +43,18 @@ DIGEST_TZ = "Asia/Taipei"
 DIGEST_TIMES = [t.strip() for t in os.environ.get("DIGEST_TIMES", "05:00,17:00").split(",") if t.strip()]
 # Startup digest: Grafana keeps its notification log in Postgres, so after a restart the same firing alerts would count as
 # "already sent". The heartbeat carries the provisioner's start time (one value per provisioner process, see provision.py),
-# which makes every start a new alert set. The startup route never repeats (group_interval / repeat 8760h).
+# which makes every start a new alert set.
 STARTED = os.environ.get("PROVISIONER_STARTED") or datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M")
+# The startup digest is sent in a 2-minute window 3 minutes after the start, the same way as the scheduled one. Not with
+# group_wait: Grafana evaluates a group's rules one after another, and Alertmanager flushes a new group at once when an alert
+# that started more than group_wait ago arrives (after a restart: every alert still firing, and the previous start's
+# heartbeat). The digest went out before the slower 12-hour report rules had been evaluated (seen 2026-10-14).
+_start = datetime.strptime(STARTED, "%Y-%m-%d %H:%M") + timedelta(minutes=3)
+if _start.date() != (_start + timedelta(minutes=2)).date():  # no window across midnight
+    _start = datetime.combine(_start.date() + timedelta(days=1), datetime.min.time())
+STARTUP_WINDOW = {"times": [{"start_time": _start.strftime("%H:%M"), "end_time": (_start + timedelta(minutes=2)).strftime("%H:%M")}],
+                  "days_of_month": [str(_start.day)], "months": [str(_start.month)], "years": [str(_start.year)],
+                  "location": DIGEST_TZ}
 
 
 def hhmm_plus(t, minutes):
@@ -104,8 +115,44 @@ SERVICE_DOWN = (f'(max by({SVC_KEY})(max_over_time(service_registered[1m])) + 0)
                 f'(max by({SVC_KEY})(last_over_time(probe_success{{job="blackbox"}}[2m]) == 1) + 0)')
 
 CRIT_BREACH = f'{USAGE_BY} >= on(instance,resource) {effective("crit")}'
-WARN_BREACH = (f'({USAGE_BY} >= on(instance,resource) {effective("warn")})'
-               f' unless ({USAGE_BY} >= on(instance,resource) {effective("crit")})')
+# 1 in a minute over the threshold, else 0, for the 12-hour report: a query without any series (no minute over crit) would
+# make Grafana treat the whole rule as NoData
+OVER_WARN = f'{USAGE_BY} >= bool on(instance,resource) {effective("warn")}'
+OVER_CRIT = f'{USAGE_BY} >= bool on(instance,resource) {effective("crit")}'
+
+# Message texts (owner, 2026-10-14): state only what the stack can confirm (how long something has not answered), never
+# guessed causes; finding the cause is the owner's job. The thresholds alert explains what it is, since its data comes from
+# the collector's own database, not from an agent. Each rule has a firing text (summary), a recovery title + text (only
+# labels: on recovery Grafana sends the annotations of the last firing evaluation) and one line for the digest.
+
+# How resources are named and measured in the texts. A new usage kind (e.g. network traffic in GB/m) is one more entry.
+RESOURCES = {"cpu": ("CPU", "%"), "memory": ("記憶體", "%"), "disk": ("磁碟", "%")}
+
+
+def by_resource(values, default):
+    """template snippet: values[resource label], or default for a resource not in the table"""
+    out = "".join(f'{{{{ {"if" if i == 0 else "else if"} eq $labels.resource "{r}" }}}}{v}' for i, (r, v) in enumerate(values.items()))
+    return out + f"{{{{ else }}}}{default}{{{{ end }}}}"
+
+
+def spaced(name, after):
+    """a space between a Latin name and the Chinese around it: 「的 CPU 用量」, 「的磁碟用量」"""
+    latin = name[0].isascii()
+    return (" " if latin else "") + name + (" " if latin and after else "")
+
+
+RES_NAME = by_resource({r: spaced(n, False) for r, (n, _) in RESOURCES.items()}, " {{ $labels.resource }}")  # 「的 CPU：」
+RES_NAME_ = by_resource({r: spaced(n, True) for r, (n, _) in RESOURCES.items()}, " {{ $labels.resource }} ")  # 「的 CPU 用量」
+RES_UNIT = by_resource({r: u for r, (_, u) in RESOURCES.items()}, "")
+
+
+def minutes(duration):
+    return int(duration.rstrip("m")) if duration.endswith("m") else 0
+
+
+DOWN_MIN = 1 + minutes(T["pend_down"])  # 1 minute without data, then pending: "every minute, 5 in a row"
+MACHINE = "{{ $labels.instance }}（專案 {{ $labels.service_namespace }}）"
+SERVICE = "{{ $labels.service }}（在 {{ $labels.instance }}，專案 {{ $labels.service_namespace }}）"
 
 
 def prom_q(ref, expr):
@@ -114,13 +161,30 @@ def prom_q(ref, expr):
                       "intervalMs": 1000, "maxDataPoints": 43200}}
 
 
+# The 12-hour report: one point per minute over the window, evaluated by Grafana as a range query and reduced by Grafana.
+# Not PromQL subqueries / set operators: in OpenObserve v1.0.4 `x[12h:1m]` evaluates x once (count_over_time(...[1h:1m])
+# = 1), and in a range query `unless` / `or` act on whole series, not per step (`registered unless up` returned nothing
+# while 8 of 112 minutes had no up). Counting points per series works, so downtime = minutes registered - minutes up.
+REPORT_MIN = 12 * 60
+
+
+def prom_range(ref, expr):
+    return {"refId": ref, "relativeTimeRange": {"from": REPORT_MIN * 60, "to": 0}, "datasourceUid": PROM_UID,
+            "model": {"refId": ref, "datasource": PROM, "expr": expr, "instant": False, "range": True,
+                      "interval": "1m", "intervalMs": 60000, "maxDataPoints": REPORT_MIN}}
+
+
 def expr(ref, model):
     return {"refId": ref, "relativeTimeRange": {"from": 0, "to": 0}, "datasourceUid": "__expr__",
             "model": dict(model, refId=ref, datasource={"type": "__expr__", "uid": "__expr__"})}
 
 
-def reduce_(ref, src):
-    return expr(ref, {"type": "reduce", "expression": src, "reducer": "last", "settings": {"mode": "dropNN"}})
+def reduce_(ref, src, reducer="last"):
+    return expr(ref, {"type": "reduce", "expression": src, "reducer": reducer, "settings": {"mode": "dropNN"}})
+
+
+def math(ref, expression):
+    return expr(ref, {"type": "math", "expression": expression})
 
 
 def thresh(ref, src, op, val):
@@ -128,61 +192,133 @@ def thresh(ref, src, op, val):
                       "conditions": [{"evaluator": {"type": op, "params": [val]}}]})
 
 
-def rule(uid, title, cond, data, summary, kind="problem", severity="critical", pend=None, no_data="OK", labels=None):
+def rule(uid, title, cond, data, summary, resolved_title="", resolved="", digest="", kind="problem", severity="critical",
+         pend=None, no_data="OK", exec_err="Alerting", labels=None):
+    annotations = {"summary": summary, "resolved_title": resolved_title, "resolved": resolved, "digest": digest}
     return {"uid": uid, "title": title, "condition": cond, "data": data, "for": pend or T["pend"],
-            "noDataState": no_data, "execErrState": "Alerting", "isPaused": False,
+            "noDataState": no_data, "execErrState": exec_err, "isPaused": False,
             "labels": {"kind": kind, "digest": "all", "severity": severity, **(labels or {})},
-            "annotations": {"summary": summary}}
+            "annotations": {k: v for k, v in annotations.items() if v}}
 
 
-def usage_rule(uid, title, promql, level_text, severity):
-    return rule(uid, title, "C", [prom_q("A", promql), reduce_("B", "A"), thresh("C", "B", "gt", -1)],
-                '{{ $labels.instance }} {{ $labels.resource }} 用量 {{ printf "%.1f" $values.B.Value }}%，超過' + level_text + "門檻",
-                severity=severity, pend=T["pend_usage"])
+def report_rule(uid, title, cond, data, digest):
+    # kind=report: only the digest routes match it, never the immediate one (kind=problem). execErrState OK: a failing
+    # 12-hour query leaves its section out of the digest instead of adding a line without labels.
+    return rule(uid, title, cond, data, "", digest=digest, kind="report", severity="none", pend="0s", exec_err="OK")
 
+
+def downtime_rule(uid, title, registered, up, what):
+    """minutes in the last 12 hours that a still registered machine / service was registered without being up"""
+    return report_rule(uid, title, "I", [
+        prom_range("A", registered), reduce_("B", "A", "count"),         # minutes registered
+        prom_range("C", f"({up}) or ({registered} * 0)"), reduce_("D", "C", "sum"),  # minutes up (0 if never up)
+        prom_q("E", registered), reduce_("F", "E"),                      # still registered now (retired: no series)
+        math("G", "($B - $D) * $F"), math("H", f"100 - $G * 100 / {REPORT_MIN}"), thresh("I", "G", "gt", 0)],
+        what + '：停機 {{ printf "%.0f" $values.G.Value }} 分鐘，可用率 {{ printf "%.1f" $values.H.Value }}%')
+
+
+T_MACHINE, T_SERVICE = "機器沒有回應 Machine DOWN", "服務沒有回應 Service DOWN"
+T_CRIT, T_THRESHOLDS = "用量超過嚴重門檻 Usage over CRIT", "Grafana 讀不到用量警告門檻資料 Thresholds unavailable"
+R_MACHINE, R_SERVICE = "機器停機（過去 12 小時）Machine downtime 12h", "服務停機（過去 12 小時）Service downtime 12h"
+R_USAGE = "用量超標（過去 12 小時）Usage over WARN 12h"
 
 rules = [
     rule("heartbeat", "心跳 Heartbeat（監控運作中）", "B",
          [expr("A", {"type": "math", "expression": "1"}), thresh("B", "A", "gt", 0)],
          "監控系統運作中。這一行永遠存在，目的是讓每天 05:00 / 17:00 的彙整一定會送出；沒收到彙整就代表監控本身壞了。",
          kind="heartbeat", severity="none", pend="0s", labels={"started": STARTED}),
-    rule("machine-down", "機器沒有回應 Machine DOWN", "C",
+    rule("machine-down", T_MACHINE, "C",
          [prom_q("A", MACHINE_DOWN), reduce_("B", "A"), thresh("C", "B", "gt", 0)],
-         "{{ $labels.instance }}（專案 {{ $labels.service_namespace }}）沒有回應：超過 1 分鐘沒收到它的狀態（agent、node_exporter"
-         " 或整台機器停了）。已經不用的機器，在 Fleet Overview 它的卡片上按 Retire。", pend=T["pend_down"]),
+         f"{MACHINE}超過 {DOWN_MIN} 分鐘沒有回應，已經不用的機器，在 Fleet Overview 它的卡片上按 Retire。",
+         "機器已恢復 Machine UP", f"{MACHINE}已經恢復", f"🔴 機器沒有回應：{MACHINE}", pend=T["pend_down"]),
     # Services: probed by the agent on their own machine (agent/probes/*.yml) and pushed like everything else, so `instance`
     # is the machine that probes it. See SERVICE_DOWN.
-    rule("service-down", "服務沒有回應 Service DOWN", "C",
+    rule("service-down", T_SERVICE, "C",
          [prom_q("A", SERVICE_DOWN), reduce_("B", "A"), thresh("C", "B", "gt", 0)],
-         "{{ $labels.service }}（在 {{ $labels.instance }}，專案 {{ $labels.service_namespace }}）沒有回應：探測不是 HTTP 200，"
-         "或沒收到探測結果（agent、blackbox-exporter 或整台機器停了）。已經不用的服務，在 Fleet Overview 它的卡片上按 Retire。",
-         pend=T["pend_down"]),
-    usage_rule("usage-warn", "用量超過警告門檻 Usage over WARN", WARN_BREACH, "警告", "warning"),
-    usage_rule("usage-crit", "用量超過嚴重門檻 Usage over CRIT", CRIT_BREACH, "嚴重", "critical"),
-    rule("thresholds-missing", "門檻資料讀不到 Thresholds unavailable", "C",
+         f"{SERVICE}超過 {DOWN_MIN} 分鐘沒有回應，已經不用的服務，在 Fleet Overview 它的卡片上按 Retire。",
+         "服務已恢復 Service UP", f"{SERVICE}已經恢復", f"🔴 服務沒有回應：{SERVICE}", pend=T["pend_down"]),
+    # Usage: only CRIT is sent at once (owner, 2026-10-14); WARN shows up in the digest's 12-hour report (usage-12h).
+    rule("usage-crit", T_CRIT, "C",
+         [prom_q("A", CRIT_BREACH), reduce_("B", "A"), thresh("C", "B", "gt", -1),
+          prom_q("D", effective("crit")), reduce_("E", "D")],
+         f'{{{{ $labels.instance }}}} 的{RES_NAME_}用量 {{{{ printf "%.1f" $values.B.Value }}}}{RES_UNIT}，'
+         f'超過嚴重門檻({{{{ printf "%g" $values.E.Value }}}}{RES_UNIT}) 已持續 {minutes(T["pend_usage"])} 分鐘。',
+         "用量回到嚴重門檻以下 Usage below CRIT", f"{{{{ $labels.instance }}}} 的{RES_NAME_}用量已回到嚴重門檻以下",
+         f'🔴 用量超過嚴重門檻：{{{{ $labels.instance }}}} 的{RES_NAME} {{{{ printf "%.1f" $values.B.Value }}}}{RES_UNIT}',
+         pend=T["pend_usage"]),
+    rule("thresholds-missing", T_THRESHOLDS, "C",
          [prom_q("A", 'absent(usage_threshold_warn{instance="*"})'), reduce_("B", "A"), thresh("C", "B", "gt", 0)],
-         "讀不到預設門檻（資料庫或 postgres-exporter 可能掛了），用量超標的告警目前不會觸發"),
+         f"超過 {minutes(T['pend'])} 分鐘讀不到警告門檻（資料庫或 postgres-exporter 可能掛了），用量超標的告警目前不會觸發。",
+         "Grafana 可以讀到用量警告門檻資料 Thresholds available", "用量超標的告警恢復運作。",
+         "🔴 Grafana 讀不到用量警告門檻資料"),
+    downtime_rule("machine-downtime", R_MACHINE, "max by(instance,service_namespace)(max_over_time(machine_registered[1m]))",
+                  'max by(instance,service_namespace)(max_over_time(up{job="node"}[1m]) == 1)', MACHINE),
+    downtime_rule("service-downtime", R_SERVICE, f"max by({SVC_KEY})(max_over_time(service_registered[1m]))",
+                  f'max by({SVC_KEY})(last_over_time(probe_success{{job="blackbox"}}[2m]) == 1)', SERVICE),
+    # minutes over the warn / crit threshold (each is counted against the threshold of that minute; the text shows the
+    # latest), the highest value, the latest thresholds: range queries too, since effective() only has series while the
+    # machine sends usage, and a machine that stopped is still reported
+    report_rule("usage-12h", R_USAGE, "K", [
+        prom_range("A", OVER_WARN), reduce_("B", "A", "sum"),
+        prom_range("C", OVER_CRIT), reduce_("D", "C", "sum"),
+        prom_range("E", USAGE_BY), reduce_("F", "E", "max"),
+        prom_range("G", effective("warn")), reduce_("H", "G"),
+        prom_range("I", effective("crit")), reduce_("J", "I"),
+        thresh("K", "B", "gt", 0)],
+        f'{{{{ $labels.instance }}}} 的{RES_NAME}：超過警告門檻({{{{ printf "%g" $values.H.Value }}}}{RES_UNIT}) '
+        f'{{{{ printf "%.0f" $values.B.Value }}}} 分鐘{{{{ with $values.D }}}}{{{{ if gt .Value 0.0 }}}}，'
+        f'其中嚴重({{{{ printf "%g" $values.J.Value }}}}{RES_UNIT}) {{{{ printf "%.0f" .Value }}}} 分鐘{{{{ end }}}}{{{{ end }}}}，'
+        f'最高 {{{{ printf "%.1f" $values.F.Value }}}}{RES_UNIT}'),
 ]
+
+REMOVED_RULES = ["usage-warn"]  # 2026-10-14: WARN only in the digest (usage-12h)
+
+# Digest sections, each a list of rule titles in display order; at most DIGEST_MAX lines each (LINE: 5000 characters per
+# message, a longer one is refused as a whole).
+DIGEST_MAX = 20
+NOW_SECTION = [T_MACHINE, T_SERVICE, T_CRIT, T_THRESHOLDS]
+REPORT_SECTIONS = [("機器", R_MACHINE), ("服務", R_SERVICE), ("用量超標", R_USAGE)]
+
+
+def lines_of(var, titles):
+    """template: collect the digest lines of the firing alerts of these rules, in this order, into slice $var"""
+    return f"{{{{- ${var} := coll.Slice -}}}}" + "".join(
+        f'{{{{- range $.Alerts.Firing }}}}{{{{ if eq .Labels.alertname "{t}" }}}}'
+        f'{{{{ ${var} = coll.Append .Annotations.digest ${var} }}}}{{{{ end }}}}{{{{ end -}}}}' for t in titles)
+
+
+def print_lines(var):
+    return (f'{{{{- range $i, $l := ${var} }}}}{{{{ if lt $i {DIGEST_MAX} }}}}\n - {{{{ $l }}}}{{{{ end }}}}{{{{ end -}}}}'
+            f'{{{{- if gt (len ${var}) {DIGEST_MAX} }}}}\n （共 {{{{ len ${var} }}}} 項，只列前 {DIGEST_MAX} 項）{{{{ end -}}}}')
+
+
+# Every newline of the message is written inside an action ({{- ... -}} trims the template's own line breaks).
+DIGEST_MESSAGE = (
+    '{{ define "digest.message" -}}\n'
+    + lines_of("now", NOW_SECTION)
+    + "".join(lines_of(f"r{i}", [t]) for i, (_, t) in enumerate(REPORT_SECTIONS))
+    + '{{- if eq (len $now) 0 }}目前所有機器與服務都正常。{{ else }}目前有問題：' + print_lines("now") + "{{ end -}}\n"
+    + "{{- if or " + " ".join(f"(len $r{i})" for i in range(len(REPORT_SECTIONS))) + " }}\n\n📋 過去 12 小時彙整{{ end -}}\n"
+    + '{{- $gap := "" -}}\n'  # a blank line between sections, not after the heading
+    + "".join(f"{{{{- if len $r{i} }}}}{{{{ $gap }}}}\n【{name}】" + print_lines(f"r{i}") + '{{ $gap = "\\n" }}{{ end -}}\n'
+              for i, (name, _) in enumerate(REPORT_SECTIONS))
+    + "{{- if not (or " + " ".join(f"(len $r{i})" for i in range(len(REPORT_SECTIONS)))
+    + ") }}\n\n📋 過去 12 小時：沒有停機，用量也沒有超標。{{ end -}}\n"
+    + "{{ end }}\n")
 
 TEMPLATE = r"""{{ define "digest.subject" -}}
 {{- $bad := 0 -}}
-{{- range .Alerts.Firing }}{{ if ne .Labels.kind "heartbeat" }}{{ $bad = 1 }}{{ end }}{{ end -}}
+{{- range .Alerts.Firing }}{{ if eq .Labels.kind "problem" }}{{ $bad = 1 }}{{ end }}{{ end -}}
 {{- if eq $bad 1 }}[監控] {{ .Vars.title }}：有問題 ⚠️{{ else }}[監控] {{ .Vars.title }}：全部正常 ✅{{ end -}}
 {{ end }}
 
-{{ define "digest.message" -}}
-{{- $bad := 0 -}}
-{{- range .Alerts.Firing }}{{ if ne .Labels.kind "heartbeat" }}{{ $bad = 1 }}{{ end }}{{ end -}}
-{{- if eq $bad 0 }}目前所有機器與服務都正常：沒有失去回應，也沒有任何用量超過門檻。{{ else -}}
-目前有問題的項目：{{ range .Alerts.Firing }}{{ if ne .Labels.kind "heartbeat" }}
- - {{ .Labels.alertname }}: {{ .Annotations.summary }}{{ end }}{{ end }}{{ end }}
-{{ end }}
-
+""" + DIGEST_MESSAGE + r"""
 {{ define "line.text.immediate" -}}
 {{- if eq .Status "firing" }}🔴 告警{{ else }}✅ 已恢復{{ end }}
 {{- range .Alerts }}
-{{ .Labels.alertname }}
-{{ .Annotations.summary }}
+{{ if eq .Status "firing" }}{{ .Labels.alertname }}
+{{ .Annotations.summary }}{{ else }}{{ .Annotations.resolved_title }}
+{{ .Annotations.resolved }}{{ end }}
 {{- end }}
 {{- end }}
 
@@ -217,7 +353,11 @@ def route(receiver, matchers, group_by, wait, interval, repeat, cont, **extra):
 
 doc = {
     "apiVersion": 1,
+    # one group: every rule is first evaluated on the same tick after a start, so the 12-hour report is there before the
+    # startup digest goes out (group_wait 1m; that route never sends again)
     "groups": [{"orgId": 1, "name": "monitoring", "folder": "Alerts", "interval": T["every"], "rules": rules}],
+    # file provisioning never deletes a rule that left the file; a uid that does not exist is ignored
+    "deleteRules": [{"orgId": 1, "uid": uid} for uid in REMOVED_RULES],
     "contactPoints": [
         {"orgId": 1, "name": "line-push-immediate", "receivers": [line_receiver("line-push-immediate", "line.payload.immediate")]},
         {"orgId": 1, "name": "line-push-startup", "receivers": [
@@ -226,10 +366,12 @@ doc = {
             line_receiver("line-push-digest", "line.payload.digest", title="定時彙整")]},
     ],
     "muteTimes": [{"orgId": 1, "name": "digest-times", "time_intervals": [
-        {"times": [{"start_time": t, "end_time": hhmm_plus(t, 2)} for t in DIGEST_TIMES], "location": DIGEST_TZ}]}],
+        {"times": [{"start_time": t, "end_time": hhmm_plus(t, 2)} for t in DIGEST_TIMES], "location": DIGEST_TZ}]},
+        {"orgId": 1, "name": "startup-window", "time_intervals": [STARTUP_WINDOW]}],
     "policies": [{"orgId": 1, "receiver": "line-push-immediate", "group_by": ["grafana_folder", "alertname"], "routes": [
         route("line-push-immediate", [["kind", "=", "problem"]], ["..."], T["imm_wait"], T["imm_int"], T["imm_rep"], True),
-        route("line-push-startup", [["digest", "=", "all"]], ["digest"], T["start_wait"], "8760h", "8760h", True),
+        route("line-push-startup", [["digest", "=", "all"]], ["digest"], "1m", "1m", "1h", True,
+              active_time_intervals=["startup-window"]),
         route("line-push-digest", [["digest", "=", "all"]], ["digest"], "1m", "1m", "1h", False,
               active_time_intervals=["digest-times"])]}],
     "templates": [{"orgId": 1, "name": "digest", "template": TEMPLATE}],

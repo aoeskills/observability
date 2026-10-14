@@ -102,7 +102,7 @@ docker compose -f docker-compose.local.yml down
 
 ### 送資料的 app（sclaser-food）
 
-sclaser-food 預設把 OTLP 送到 `http://localhost:4318`，也就是同一台 agent 的 `otel-agent`。`npm run dev`、`npm start` 和 Docker image 都會自動先載入 OpenTelemetry（`.otel/preload.cjs`），開發和部署都不用另外設定。用 docker compose 跑的 `web` 服務會送到 `host.docker.internal:4318`。它自己設 `service.namespace = sclaser_food`，不管跑在哪台 agent，資料都進 stream `sclaser_food`。
+sclaser-food 預設把 OTLP 送到 `http://localhost:4318`，也就是同一台 agent 的 `otel-agent`。`npm start` 和 Docker image 會自動先載入 OpenTelemetry（`.otel/preload.cjs`），部署不用另外設定。`npm run dev` 不載入：開發時 log 只出現在 terminal，不暫存、不送任何地方。用 docker compose 跑的 `web` 服務會送到 `host.docker.internal:4318`。它自己設 `service.namespace = sclaser_food`，不管跑在哪台 agent，資料都進 stream `sclaser_food`。
 
 sclaser-food 的 session cookie 是加密的 `{sessionToken, userId, username}`（sclaser-food `docs/adr/0008`）；同一個 request 的每個 span 和 log 都有 `enduser_id`（DB id）和 `user_name`（手機號碼），可以直接用來查資料庫。
 細節在 sclaser-food 的 `src/otel-preload.ts`、`src/instrumentation.ts`、`src/lib/observability/`。
@@ -115,11 +115,11 @@ sclaser-food 的 session cookie 是加密的 `{sessionToken, userId, username}`�
 |---|---|
 | 服務沒有回應 | 曾經出現過的服務（那台 agent 每分鐘探測一次，`agent/probes/*.yml`）連續 5 分鐘不是 HTTP 200，或沒收到探測結果（agent 或整台機器停了：這時「機器沒有回應」和它上面每個服務的「服務沒有回應」都會發）。卡片變紅色 DOWN；不再探測的服務在它的「no data」卡片上按 **Retire** 移除 |
 | 機器沒有回應 | 曾經出現過的 agent 超過 1 分鐘沒送狀態，持續 4 分鐘（otel-agent、node_exporter 或整台機器停了）。卡片變紅色 DOWN；不再使用的機器在卡片上按 **Retire** 移除 |
-| 用量超過警告 / 嚴重門檻 | CPU、記憶體、磁碟 `/` 超過該機器的門檻（持續 2 分鐘） |
-| 門檻資料讀不到 | 門檻 DB 或 postgres-exporter 掛了 |
-| 彙整 | collector 啟動時一則，之後每天 05:00、17:00（UTC+8）一則；一定會送：「全部正常」或列出問題（沒收到 = 監控本身壞了）。時間可用 `DIGEST_TIMES` 改 |
+| 用量超過嚴重門檻 | CPU、記憶體、磁碟 `/` 超過該機器的嚴重門檻（持續 2 分鐘）。超過警告門檻不即時通知，只列在彙整裡 |
+| Grafana 讀不到用量警告門檻資料 | 門檻 DB 或 postgres-exporter 掛了，用量告警暫時不會觸發 |
+| 彙整 | collector 啟動約 3 分鐘後一則，之後每天 05:00、17:00（UTC+8）一則；一定會送（沒收到 = 監控本身壞了）。內容：目前有問題的項目（或「全部正常」），以及過去 12 小時的【機器】【服務】停機分鐘與可用率、【用量超標】（超過警告 / 嚴重門檻幾分鐘、最高值）；沒有的段落不顯示。時間可用 `DIGEST_TIMES` 改 |
 
-出事立即送一則、恢復時送一則；問題持續中由定時彙整提醒。LINE 免費方案每月 200 則，彙整本身每月約 60 則；新增會常常觸發的規則前先想配額。設計沿用 GCP（彙整時間改為固定時刻）（`provisioner/grafana/gen_alerts.py`）。
+出事立即送一則、恢復時送一則（告警只寫確認得到的事實，例如多久沒回應，不猜原因）；問題持續中、或不到 5 分鐘的短暫中斷，由定時彙整提醒。LINE 免費方案每月 200 則，彙整本身每月約 60 則；新增會常常觸發的規則前先想配額。設計沿用 GCP（彙整時間改為固定時刻）（`provisioner/grafana/gen_alerts.py`）。
 
 **設定 LINE**：在 collector 的 `.env` 填 `LINE_CHANNEL_ACCESS_TOKEN`、`LINE_USER_ID`，然後重建 Grafana（只 restart 不會讀到新的值）。收不到時怎麼查，見 collector runbook。
 

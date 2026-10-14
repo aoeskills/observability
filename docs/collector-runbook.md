@@ -128,7 +128,7 @@ docker compose -f docker-compose.prod.yml ps -a
 - `docker logs --tail 10 provisioner` 有 `created pipeline route_traces_by_namespace` / `route_logs_by_namespace`，agent 送資料後有 `machine registered <機器名稱>`。
 - 網頁打得開（見 README 的「網頁」）；Fleet Overview 出現 agent 的卡片。
 - 約 20 分鐘後 bucket 裡出現 `files/default/metrics/...`；traces / logs 也一樣，但資料很少的 stream 會更晚（見下方「停機與重開的代價」）。
-- LINE 收到一則「開機彙整」。
+- 啟動約 3～5 分鐘後，LINE 收到一則「監控啟動」彙整。
 
 ## 6. 更新
 
@@ -157,7 +157,7 @@ cd ~/observability && git pull
 | 已存的資料 | 已上傳的在 GCS / Cloud SQL；尚未上傳的在 volume `openobserve-wal`，`down` 不刪 volume，重開後接著用 |
 | 儀表板、pipeline、門檻、機器清單 | 在 Postgres 或由 provisioner 重新產生，不受影響 |
 | 告警 | 停機期間不會有告警；告警狀態在 Postgres，重開後接著評估。DOWN 告警要連續 4 分鐘，agent 補送很快，一般不會誤報 |
-| LINE | 重開後送一則開機彙整；已發過的告警不會重發 |
+| LINE | 重開約 3～5 分鐘後送一則啟動彙整（含過去 12 小時的停機，停機期間沒資料的時段不算停機）；已發過的告警不會重發 |
 | 網頁 | 停機期間打不開，重開約 1～2 分鐘 |
 
 - **不要 `down -v`**：會刪掉尚未上傳到 GCS 的資料和 Grafana 外掛快取。尚未上傳的資料通常是最近約 20 分鐘；資料很少的 stream 可能更久，因為 WAL 檔過了 10 分鐘後要等「下一筆資料」進來才會封檔（2026-10-13 觀察到 logs 停留 28 分鐘）。

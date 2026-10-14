@@ -195,15 +195,36 @@ OpenObserve's Prometheus-compatible API (`/api/default/prometheus`, basic auth f
   `docker compose -f docker-compose.local.yml restart grafana`; afterwards the same without `LINE_PUSH_URL`. `ALERTS_MODE=test` instead gives
   1-minute timers and a fake token. Verified 2026-10-12 (before the move to runtime generation): the (since removed) Service DOWN
   fired after 5 failed probes, "已恢復" ~5 min after recovery (group_interval).
+- **Message texts** (owner, 2026-10-14): alerts state only what the stack can confirm ("超過 5 分鐘沒有回應"), never guessed
+  causes (the owner investigates); the thresholds alert is the exception and says what it is (collector-side data). Each rule
+  has annotations `summary` (firing text), `resolved_title` + `resolved` (recovery, labels only: Grafana sends the last firing
+  annotations) and `digest` (its line in the digest). Usage: only **CRIT** is sent at once; WARN appears only in the digest.
+  Resource names / units come from `RESOURCES` in `gen_alerts.py` (one entry per new usage kind). A rule removed from the
+  generator goes into `REMOVED_RULES` (`deleteRules`): file provisioning never deletes a rule that left the file (the old
+  `usage-warn` stayed in Grafana until then).
 - **Digest** (owner, 2026-10-13: at start + 05:00 / 17:00 UTC+8, was every 12 h from Grafana's start): Alertmanager has no cron,
-  so two routes match `digest=all`. Startup route: group_wait 1m, never repeats; the heartbeat carries label `started` = the
-  provisioner's start time, because Grafana keeps its notification log in Postgres and would otherwise treat the same alert set
-  as already sent after a restart. A Grafana-only restart therefore sends no startup digest; `up` (provisioner + Grafana) does.
-  Scheduled route: flushes every minute but only inside the 2-minute active time interval `digest-times` (Asia/Taipei,
-  `DIGEST_TIMES` env of the provisioner), repeat 1h. Grafana runs the previously stored alertmanager config for up to ~1 min
-  after start, so the first start after a config change can send one message in the old form. Verified 2026-10-13 with
-  fake-line: startup digest within 1 min, scheduled one at the window's minute and only once, new `started` after a
-  provisioner restart → new startup digest (Grafana must start after the provisioner's first pass: `up`, not `restart`).
+  so two routes match `digest=all`, both flushing every minute but only inside a 2-minute active time interval, repeat 1h:
+  `digest-times` (Asia/Taipei, `DIGEST_TIMES` env of the provisioner) and `startup-window` (one dated window 3–5 minutes after
+  the provisioner's start). Not group_wait for the startup one (until 2026-10-14): Grafana evaluates a group's rules one
+  after another, and Alertmanager flushes a new group at once when an alert older than group_wait arrives (after a restart:
+  everything still firing, the previous heartbeat), so the startup digest went out before the slower 12-hour rules were in.
+  The heartbeat carries label `started` = the provisioner's start time, because Grafana keeps its notification log in
+  Postgres and would otherwise treat the same alert set as already sent after a restart. A Grafana-only restart therefore
+  sends no startup digest; `up` (provisioner + Grafana) does. Grafana runs the previously stored alertmanager config for up to
+  ~1 min after start, so the first start after a config change can send one message in the old form.
+  Content (owner, 2026-10-14): "目前有問題" (machine → service → usage CRIT → thresholds), then "📋 過去 12 小時彙整" with
+  sections 【機器】【服務】【用量超標】 (empty ones left out; all empty → one line "沒有停機，用量也沒有超標"), at most 20 lines
+  per section (LINE: 5000 characters per message, a longer one is refused as a whole).
+- **12-hour report rules** (`kind=report`, so only the digest routes take them): `machine-downtime` / `service-downtime`
+  (minutes registered − minutes up, only machines / services still registered; availability = 100 − minutes / 7.2) and
+  `usage-12h` (minutes ≥ warn, of them ≥ crit, highest value, latest thresholds). Range queries over 12 h at 1-minute steps,
+  reduced by Grafana (count / sum / max / last): OpenObserve's subqueries and range-mode set operators do not work (see
+  gotchas). Every query of a rule must return series: Grafana marks the whole rule NoData when any one is empty (an empty
+  "minutes over crit" hid the usage report), hence `>= bool` and `up or registered * 0`.
+  Verified 2026-10-14 in local mode with fake data back-filled through `/api/default/ingest/metrics/_json` (4 h; scenarios:
+  30-min gap + 10 min `up=0` → 39 min, retired machine left out, failing / silent probes → 18 and 10 min, memory over an own
+  warn of 70 for 36 min of which 6 over crit 85, peak 90; CRIT immediate text with its threshold), all texts read back from
+  rule annotations; startup digest with all three sections sent once inside its window; Machine DOWN immediate text with fake-line.
 
 ## Agent + gateway (mTLS)
 Owner's decision (2026-10-13): every machine pushes everything (node_exporter metrics, apps' traces and logs) through one agent;
@@ -284,6 +305,15 @@ is gitignored) — migrations only go forward.
 - **No subqueries**: `x[2h:1m]` on a selector → HTTP 400; on an expression only one point is evaluated (the old
   "Last seen up" panel always showed 0). `timestamp(x)` returns the evaluation time, not the sample's. Use
   `*_over_time` on plain selectors (sample counts) or a metric whose value is a time (`node_time_seconds`).
+- **Subqueries are broken**: `x[12h:1m]` evaluates x once (`count_over_time(m[1h:1m])` = 1, not 60), and fails with
+  "Unsupported subquery" when x contains rate(). In **range queries** `unless` / `or` act on whole series, not per step
+  (`registered unless up` returned nothing while 8 of 112 minutes had no up). Instead: range query + Grafana reduce, `>= bool`.
+- **Range results are cached** (on disk, survives a restart): data back-filled into an already queried time range stays
+  invisible to the same query string (`[1m]` vs `[60s]` gave 6 vs 241 points). Real data arrives in order; for tests with
+  back-filled data use equivalent but different durations.
+- JSON metrics ingest (`/api/{org}/ingest/metrics/_json`) lowercases metric names (`node_memory_MemTotal_bytes` →
+  `node_memory_memtotal_bytes`), and older than `ZO_INGEST_ALLOWED_UPTO` (default 5 h) is refused. Whether remote write keeps
+  `node_memory_MemAvailable_bytes` findable is unverified until the first Linux agent (macOS has no such metric).
 - Dashboard variables of type `query_values` resolve asynchronously; panels show "no data" for a few seconds on first load.
 - `PUT /api/{org}/dashboards/{id}` needs `?folder=` and `&hash=` (the current hash from the list call); a dashboard's hash changes on every write.
 
