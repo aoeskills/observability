@@ -23,6 +23,7 @@
 服務之間的關係見 [docs/architecture.md](docs/architecture.md)（mermaid 圖）。各角色的操作手冊：
 - collector：架設、更新、重開、備份、疑難排解 → **[docs/collector-runbook.md](docs/collector-runbook.md)**
 - agent：加一台機器、簽憑證、服務探測、退役 → **[docs/agent-runbook.md](docs/agent-runbook.md)**
+- 除役：把一台機器上的這套 stack（服務、資料、套件、設定、測試痕跡）清乾淨 → **[docs/decommission-runbook.md](docs/decommission-runbook.md)**
 
 **儀表板和告警規則不在 repo 裡、也不在 UI 上編輯**：`provisioner` 服務每 60 秒依「目前實際存在的東西」產生它們（每個 project 的 stream 一個 OpenObserve 儀表板、Grafana 上對應的連結、stream 的分流規則和保存天數）。新 project 送進資料後會自動出現，stream 被刪除後自動消失；UI 上的修改會被還原。要改內容就改 `provisioner/` 裡的 generator。
 

@@ -13,7 +13,7 @@ the Mac in `backups/gcp-monitoring-configs-20261013.tar.gz`; its alert / thresho
 (`docker-compose.prod.yml`: gateway, OpenObserve, Grafana, ...); **agent** = a monitored host running only `agent/`. Data flows
 agent → collector only. `otel-collector` / `otel-agent` are the containers; **gateway** = the collector's `otel-collector`
 service. One machine can be both (local mode). Use these words for roles in code comments and docs, never "observer", and
-"VM" / "Mac" only for a specific machine. Owner-facing runbooks: `docs/collector-runbook.md`, `docs/agent-runbook.md`;
+"VM" / "Mac" only for a specific machine. Owner-facing runbooks: `docs/collector-runbook.md`, `docs/agent-runbook.md`, `docs/decommission-runbook.md`;
 `docs/architecture.md` shows only services, connections and protocols (workflows belong in the runbooks).
 
 ## Rules
@@ -55,6 +55,7 @@ service. One machine can be both (local mode). Use these words for roles in code
 | `node-exporter/` | flags for this Mac's brew service (`scripts/setup-node-exporter-macos.sh`); Linux agents run node_exporter from `agent/` |
 | `docs/collector-runbook.md` | the collector (zh): setup (env + password rules, gateway cert via CSR, firewall, deploy key), update, restart cost, backup, troubleshooting |
 | `docs/agent-runbook.md` | adding an agent (zh): certificate via CSR, `agent/.env`, probes, apps, checks, troubleshooting, rename / retire |
+| `docs/decommission-runbook.md` | removing the stack from a machine (zh): apps, containers, Homebrew node_exporter, volumes incl. anonymous ones, images, gitignored files, temp / test traces, Retire on the collector |
 | `docs/architecture.md` | services, connections, protocols and auth only (mermaid + table) |
 | `tools/fake_line_server.py` | stand-in for the LINE push API, for alert tests |
 
