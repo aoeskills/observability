@@ -11,10 +11,12 @@
 | 角色 | 是什麼 | 跑什麼 | 幾台 | 目前是 |
 |---|---|---|---|---|
 | **collector**（收集端） | 收資料、存資料、看資料、發告警的那一台 | 整套服務：gateway（`otel-collector`，唯一入口 :4317）、OpenObserve、Grafana、provisioner、Caddy…（`docker-compose.prod.yml`） | 一台 | GCP VM `aoeskills-first-host` |
-| **agent**（被收集端） | 被監控的機器 | 只跑 `agent/`：`otel-agent`（收本機 app 的 traces / logs、scrape 本機 node_exporter、探測本機服務）、`blackbox-exporter`、Linux 上的 `node-exporter` | 任意台 | 這台 Mac（`local-mac`） |
+| **agent**（被收集端） | 被監控的機器 | 只跑 `agent/`：`otel-agent`（收本機 app 的 traces / logs、scrape 本機 node_exporter、探測本機服務）、`blackbox-exporter`、Linux 上的 `node-exporter` | 任意台 | `aoeskills-first-host`（collector 自己）、sclaser 的 GCP VM `instance-20260804-060650`。這台 Mac（`local-mac`）停用中：它的憑證在 2026-10-15 換 CA 後失效 |
 
 - 資料只有一個方向：**agent 主動推給 collector**（OTLP gRPC + mTLS，用我們自建 CA 簽的憑證）。collector 從不主動連 agent（純 push），所以加一台 agent 不用改 collector。
-- 一台機器可以同時是兩種角色：**local 模式**（開發用）就是一台 Mac 同時跑 collector 全套和自己的 agent。目前這台 Mac 只當 agent，collector 在 GCP VM 上。
+- **簽憑證是 collector 的職責**：CA 放在 collector 的 `pki/`（不進 git），gateway 和每台 agent 的憑證都由它簽。agent 的私鑰在 agent 上產生、不離開那台機器，交給 collector 的只有 CSR。
+- agent 上**不 clone 這個 repo**：只放 agent runbook 列出的幾個檔案。操作者的電腦上有 repo（文件 + 要複製的檔案），從那裡 ssh 到 collector 和 agent。
+- 一台機器可以同時是兩種角色：**local 模式**（開發用）就是一台 Mac 同時跑 collector 全套和自己的 agent。目前 collector 在 GCP VM 上，它同時也是自己的 agent（`~/agent`，和其他 agent 一樣）。
 - 名稱對照：「collector」「agent」指**角色**（某台主機）；`otel-collector`、`otel-agent` 指**容器 / 服務**；**gateway** 指 collector 上的 `otel-collector` 服務（agent 唯一連的入口）。兩個容器其實都是 OpenTelemetry Collector 程式，只是設定不同。
 - 「VM」「Mac」只在講具體某台機器時使用（例如「GCP VM `aoeskills-first-host`」「這台 Mac」）。
 
@@ -72,7 +74,7 @@ Grafana 帳密是 collector `.env` 的 `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PAS
 docker compose -f docker-compose.prod.yml up -d
 ```
 
-**agent**：只跑 `agent/`，見 [docs/agent-runbook.md](docs/agent-runbook.md)。這台 Mac 的 agent（`agent/.env`：`HOST_NAME=local-mac`、`SERVICE_NAMESPACE=sclaser_food`、`GATEWAY_ENDPOINT=<collector IP>:4317`、`AGENT_CERTS_DIR=../pki/clients/local-mac`；Mac 用 `docker-compose.mac.yml` 的接法）：
+**agent**：只跑 `agent/`，見 [docs/agent-runbook.md](docs/agent-runbook.md)。這台 Mac 的 agent（`agent/.env`：`HOST_NAME=local-mac`、`SERVICE_NAMESPACE=sclaser_food`、`GATEWAY_ENDPOINT=<collector IP>:4317`，憑證在 `agent/certs/`，照 agent runbook 第 1 步由 collector 簽；Mac 用 `docker-compose.mac.yml` 的接法）：
 
 ```bash
 cd agent && docker compose -f docker-compose.yml -f docker-compose.mac.yml up -d
@@ -94,8 +96,8 @@ docker compose -f docker-compose.local.yml up -d
 docker compose -f docker-compose.local.yml down
 ```
 
-- 它會一起啟動這台 Mac 的 agent，所以先停掉上面單獨跑的 agent（`cd agent && docker compose down`），並把 `agent/.env` 的 `GATEWAY_ENDPOINT` 改成 `host.docker.internal:4317`；回到 prod 時改回 collector 的 IP。
-- 需要 `.env`（`cp .env.example .env`，填 `ZO_ROOT_USER_PASSWORD`（8 字元以上，含大小寫、數字、特殊符號）、`GRAFANA_ADMIN_PASSWORD`）和本機的 gateway 憑證（SAN 要有 `host.docker.internal`）。
+- 它會一起啟動這台 Mac 的 agent，所以先停掉上面單獨跑的 agent（`cd agent && docker compose down`），並把 `agent/.env` 的 `GATEWAY_ENDPOINT` 改成 `host.docker.internal:4317`、加上 `AGENT_CERTS_DIR=../pki/clients/local-mac`；回到 prod 時改回 collector 的 IP、拿掉 `AGENT_CERTS_DIR`。
+- 需要 `.env`（`cp .env.example .env`，填 `ZO_ROOT_USER_PASSWORD`（8 字元以上，含大小寫、數字、特殊符號）、`GRAFANA_ADMIN_PASSWORD`）和本機的憑證。local 模式的 collector 就是這台 Mac，所以它有自己的 CA（和 prod collector 的 CA 無關）：`scripts/pki.sh init`、`scripts/pki.sh gateway host.docker.internal`、`scripts/pki.sh client local-mac`。
 - `down` 會保留所有資料（volume）；加 `-v` 才會連資料一起刪。其他指令也一樣帶 `-f`，例如 `docker compose -f docker-compose.local.yml logs -f openobserve`。
 
 資料怎麼從 WAL 進到 bucket、查詢怎麼合併兩邊，見 AGENTS.md 的 Storage。
@@ -149,8 +151,8 @@ UI 上手動新建的 OpenObserve 儀表板（說明裡沒有 `[managed: ...]` �
 
 全部在新的 agent 上設定，collector 不用改。步驟、確認方式和疑難排解見 **[docs/agent-runbook.md](docs/agent-runbook.md)**，摘要：
 
-1. 憑證：在新 agent 上產生私鑰和 CSR，CSR 拿回這台 Mac 用 CA 簽（CA 私鑰只在這台 Mac 的 `pki/`；由 Claude 簽），只把簽好的憑證送回去。私鑰不離開那台機器。
-2. 把 `agent/` 的檔案複製過去，`agent/.env` 填 `SERVICE_NAMESPACE`（屬於哪個 project）、`GATEWAY_ENDPOINT=<collector IP>:4317`；app 跑在 Docker 的話設 `AGENT_OTLP_BIND=<docker0 IP>:4318`。要探測的服務寫在 `agent/probes/*.yml`。
+1. 憑證：在新 agent 上產生私鑰和 CSR，CSR 交給 collector 簽（`scripts/pki.sh sign`，CA 在 collector 的 `pki/`），只把簽好的憑證送回去。私鑰不離開那台機器。
+2. 從操作者電腦上的 repo 把 `agent/` 的幾個檔案複製過去（agent 上不 clone repo），`agent/.env` 填 `SERVICE_NAMESPACE`（屬於哪個 project）、`GATEWAY_ENDPOINT=<collector IP>:4317`；app 跑在 Docker 的話設 `AGENT_OTLP_BIND=<docker0 IP>:4318`。要探測的服務寫在 `agent/probes/*.yml`。
 3. `docker compose up -d`：起 otel-agent、blackbox-exporter 和 node_exporter（都只聽 127.0.0.1）。
 4. Fleet Overview 會自動多出這台的卡片、套用預設門檻；告警也自動涵蓋。卡片名稱是 otel-agent 自動偵測的機器名稱（GCP 上就是 VM 名稱，在 GCP 改名後一分鐘內跟著改）。
 

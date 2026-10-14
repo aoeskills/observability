@@ -2,7 +2,7 @@
 
 **agent** 是被監控的機器（角色定義見 [README 的「角色與用詞」](../README.md#角色與用詞)）。每台 agent 只跑 `agent/`：`otel-agent` 收集這台機器的狀態（node_exporter）、這台機器上服務的 HTTP 探測結果（blackbox-exporter）和 app 的 traces / logs，用 mTLS 推到 collector 的 gateway（`:4317`）。**collector 不用做任何修改**，新 agent 的卡片、告警、OpenObserve stream 都會自動出現。架構見 [architecture.md](architecture.md)；collector 那一端見 [collector-runbook.md](collector-runbook.md)。
 
-下面的 `<agent>` 是新 agent 的 ssh 名稱，指令裡的「這台 Mac」是放 CA 的那台（repo 根目錄、`pki/`）。
+下面的指令都在**操作者的電腦**上、這個 repo 的根目錄執行（repo 在那裡只用來讀文件和複製檔案），透過 ssh 操作兩台主機：`<agent>` 是新 agent 的 ssh 名稱，`<collector>` 是 collector 的 ssh 名稱（目前是 `GCP_aoeskills`）。**agent 上不 clone 這個 repo**，只放第 2 步列的幾個檔案。collector 自己也當 agent 時，`<agent>` 和 `<collector>` 是同一台，步驟完全一樣（一樣用 `~/agent`，不用 collector 上 repo 裡的 `agent/`）。
 
 名詞：
 - **機器名稱**：這台 agent 在所有資料裡的名字，也就是 OpenTelemetry 的 `host.name`，**由 otel-agent 自動偵測**，每分鐘重新偵測一次：GCP 上是 VM 的名稱，其他環境是作業系統的 hostname。它會出現在 Fleet Overview 的卡片、metrics 的 `instance` / `host_name`、traces / logs 的 `host.name`，也是門檻和機器清單的 key。只有偵測不到好名字的機器（例如這台 Mac）才在 `agent/.env` 設 `HOST_NAME` 覆蓋。憑證的名稱和它無關。
@@ -13,12 +13,12 @@
 | 在哪裡 | 需要 |
 |---|---|
 | 新 agent | Linux、Docker + Docker Compose；能**連出去**到 collector 的 4317（不需要開任何對內的 port） |
-| collector | 已照 [collector-runbook.md](collector-runbook.md) 架好：gateway 對外開放、防火牆允許 4317、gateway 憑證的 SAN 包含 agent 要連的 IP 或名稱（目前 `34.146.61.17`） |
-| 這台 Mac | 這個 repo 和 `pki/`（CA 私鑰只在這裡，不進 git）。憑證由 Claude 在這台 Mac 上簽 |
+| collector | 已照 [collector-runbook.md](collector-runbook.md) 架好：gateway 對外開放、防火牆允許 4317、gateway 憑證的 SAN 包含 agent 要連的 IP 或名稱（目前 `34.146.61.17`，collector 自己用 `127.0.0.1`），以及 CA（`~/observability/pki/`，collector runbook 第 3 步）。**簽憑證是 collector 的職責** |
+| 操作者的電腦 | 這個 repo 的 clone；能 ssh 到 collector 和新 agent |
 
-## 1. 憑證：在新 agent 上產生私鑰，在這台 Mac 上簽
+## 1. 憑證：在新 agent 上產生私鑰，由 collector 簽
 
-私鑰在新 agent 上產生、不離開那台機器；這台 Mac 只簽 CSR，送回去的只有憑證。
+私鑰在新 agent 上產生、不離開那台機器。collector 只簽 CSR，CSR 和憑證透過 ssh 管線經過操作者的電腦傳遞，不會在那裡留下檔案。
 
 在新 agent 上（`<機器名稱>` 只是憑證上的名字，和偵測到的機器名稱無關）：
 
@@ -26,10 +26,16 @@
 ssh <agent> 'mkdir -p ~/agent/certs ~/agent/probes && cd ~/agent/certs && openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout client.key -out client.csr -subj "/CN=<機器名稱>" && chmod 600 client.key'
 ```
 
-在這台 Mac 上（repo 根目錄）把 CSR 拿回來、用 CA 簽（有效 2 年）、把憑證和 CA 憑證送回去，刪掉 CSR：
+CSR 交給 collector 簽（有效 2 年），簽好的憑證直接寫回 agent（collector 的 stderr 會印出憑證的名稱和到期日）：
 
 ```bash
-scp <agent>:agent/certs/client.csr "$TMPDIR/client.csr" && printf 'extendedKeyUsage=clientAuth\nkeyUsage=digitalSignature\n' > "$TMPDIR/client.ext" && openssl x509 -req -in "$TMPDIR/client.csr" -CA pki/ca.crt -CAkey pki/ca.key -CAcreateserial -days 730 -sha256 -extfile "$TMPDIR/client.ext" -out "$TMPDIR/client.crt" && openssl verify -CAfile pki/ca.crt "$TMPDIR/client.crt" && scp "$TMPDIR/client.crt" pki/ca.crt <agent>:agent/certs/ && ssh <agent> 'rm ~/agent/certs/client.csr'
+ssh <agent> 'cat ~/agent/certs/client.csr' | ssh <collector> 'cd ~/observability && scripts/pki.sh sign' | ssh <agent> 'cat > ~/agent/certs/client.crt'
+```
+
+把 CA 憑證送過去，刪掉 CSR，然後驗證（印出 `client.crt: OK`）：
+
+```bash
+ssh <collector> 'cat ~/observability/pki/ca.crt' | ssh <agent> 'cd ~/agent/certs && cat > ca.crt && rm client.csr && openssl verify -CAfile ca.crt client.crt'
 ```
 
 `~/agent/certs/` 最後有 `ca.crt`、`client.crt`、`client.key` 三個檔案。otel-agent 在容器裡以 root 執行，所以私鑰維持 600 即可。
@@ -56,7 +62,7 @@ cd ~/agent && cp .env.example .env
 |---|---|
 | `HOST_NAME` | **通常不用設**：GCP 上會自動用 VM 名稱。只有自動偵測的名字不能用時才設（例如這台 Mac） |
 | `SERVICE_NAMESPACE` | 這台機器屬於的 project，例如 `sclaser_food` |
-| `GATEWAY_ENDPOINT` | `<collector IP 或名稱>:4317`（目前 `34.146.61.17:4317`），必須是 gateway 憑證 SAN 裡的其中一個 |
+| `GATEWAY_ENDPOINT` | `<collector IP 或名稱>:4317`（目前 `34.146.61.17:4317`；collector 自己的 agent 用 `127.0.0.1:4317`），必須是 gateway 憑證 SAN 裡的其中一個 |
 | `COMPOSE_PROFILES=node-exporter` | 保留：由這份 compose 一起跑 node_exporter。這台 agent 上**已經有** node_exporter 的話刪掉這行，並設 `NODE_EXPORTER_TARGET=<它的位址>`（預設 `127.0.0.1:9100`） |
 | `AGENT_OTLP_BIND` | app 送 traces / logs 的位址，**見第 5 步**：app 直接跑在這台 agent 上（不在 Docker 裡）不用設；app 跑在 Docker（例如 sclaser-food）設 `172.17.0.1:4318` |
 
@@ -161,7 +167,7 @@ curl -s '127.0.0.1:9115/probe?module=http_200&target=http://127.0.0.1:3000/login
 
 | 症狀 | 原因與處理 |
 |---|---|
-| agent log：`x509: certificate is valid for ..., not ...` | `GATEWAY_ENDPOINT` 不在 gateway 憑證的 SAN 裡 → 第 1 步重簽 gateway 憑證，或改用 SAN 裡的名稱 |
+| agent log：`x509: certificate is valid for ..., not ...` | `GATEWAY_ENDPOINT` 不在 gateway 憑證的 SAN 裡 → 重簽 gateway 憑證（[collector-runbook.md](collector-runbook.md) 第 3 步），或改用 SAN 裡的名稱 |
 | agent log：`connection refused` / timeout | collector 沒開放 4317（`OTEL_GATEWAY_BIND=0.0.0.0`、雲端防火牆），或 IP 打錯 |
 | agent log：`context deadline exceeded` / `Unavailable`，但 4317 連得上 | collector 那邊 OpenObserve 沒起來，gateway 寫不進去 → 見 collector runbook 的疑難排解 |
 | agent log：`certificate required` / `bad certificate` | `agent/certs` 少檔案，或憑證不是這個 CA 簽的（CA 重建過 → 重簽所有機器） |
@@ -180,5 +186,5 @@ curl -s '127.0.0.1:9115/probe?module=http_200&target=http://127.0.0.1:3000/login
 | 移除機器 | `docker compose down`（磁碟佇列保留；加 `-v` 連佇列一起刪），然後在 Fleet Overview 它的紅色 DOWN 卡片上按 **Retire**（從機器清單刪除、刪掉它自己的門檻，卡片和告警約 1 分鐘內消失）。它的服務各自在 Services 的 DOWN 卡片上按 **Retire**（機器的 Retire 不會連帶移除服務）。沒按 Retire 就會一直顯示 DOWN 並告警：這就是「機器 / 服務掛了」的偵測方式 |
 | 暫時停機維護 | 停機期間機器和它的服務都會顯示 DOWN 並告警，恢復後自動回到 UP。不要按 Retire（按了也沒關係，再送資料時會自動重新登記，只是機器的門檻回到預設） |
 | 更新 agent 設定 | 從 repo 重新複製 `config.yaml` / `docker-compose.yml` / `blackbox.yml`，執行 `docker compose up -d` |
-| 憑證到期（client 2 年） | 第 1 步重做（新私鑰 + CSR，這台 Mac 簽），執行 `docker compose restart otel-agent` |
-| 撤銷一台 agent | gateway 沒有撤銷清單：在這台 Mac 重建 CA（`scripts/pki.sh init`，先移走舊的 `pki/`），重簽 gateway 憑證（[collector-runbook.md](collector-runbook.md) 第 3 步）和每台保留的 agent（第 1 步），所有 agent 換上新的 `ca.crt` |
+| 憑證到期（client 2 年） | 先刪掉 `~/agent/certs/client.key`，第 1 步重做（新私鑰 + CSR，collector 簽），執行 `docker compose restart otel-agent` |
+| 撤銷一台 agent | gateway 沒有撤銷清單：在 collector 上重建 CA（先移走舊的 `pki/`，`scripts/pki.sh init`），重簽 gateway 憑證（[collector-runbook.md](collector-runbook.md) 第 3 步）和每台保留的 agent（第 1 步），所有 agent 換上新的 `ca.crt` |

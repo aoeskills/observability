@@ -12,7 +12,9 @@
 | Postgres | Cloud SQL（Postgres 18），私有 IP，使用者 `obs_app`，三個 DB：`openobserve`、`grafana`、`monitoring` |
 | 防火牆 | 規則 `allow-otel-gateway`：tcp:4317，來源 `0.0.0.0/0`，套用到 network tag `otel-gateway`（agent 的 IP 會變，憑證才是門禁） |
 | 網頁 | `ssh -N -L 8080:127.0.0.1:80 GCP_aoeskills` → http://localhost:8080/grafana/ ；Tailscale：http://aoeskills-first-host.tail8656d8.ts.net/grafana/ （VM 上的 `tailscale serve` 把 tailnet 的 :80 轉到 127.0.0.1:80） |
-| 用量 | 約 1.4 GB RAM（OpenObserve ~310 MB、Grafana ~345 MB、otel-collector ~75 MB）、磁碟剩約 2.3 GB |
+| CA | `~/observability/pki/`（`ca.key` / `ca.crt`，2026-10-15 建立，10 年）：gateway 和所有 agent 的憑證都在這裡簽（第 3 步） |
+| 自己的 agent | `~/agent`（和其他 agent 一樣照 [agent-runbook.md](agent-runbook.md)，不用 repo 裡的 `agent/`）：project `observability`，`GATEWAY_ENDPOINT=127.0.0.1:4317` |
+| 用量 | 2026-10-15：約 1.7 GB RAM（OpenObserve ~410 MB、Grafana ~350 MB、otel-collector ~65 MB、otel-agent ~60 MB），可用約 280 MB；磁碟 67%（剩約 3.1 GB）。2026-10-15 清掉 apt 快取、journal、移除 Google Cloud Ops Agent；OpenObserve 的容器 log 曾累積 1.6 GB（重建容器時刪除），之後每個容器的 log 上限 50 MB |
 
 ## 0. 前提
 
@@ -20,7 +22,6 @@
 |---|---|
 | collector 主機 | Linux、Docker + Docker Compose ≥ 2.20（`include`）、`git`；能連到 bucket 和 Postgres |
 | GCP | GCS bucket（OpenObserve 不會自己建）+ 有讀寫權限的 service account 的 HMAC key；Cloud SQL Postgres（使用者有 CREATEDB，否則手動建三個 DB）；防火牆開 tcp:4317 |
-| 這台 Mac | repo 和 `pki/`（CA 私鑰只在這裡）：簽 gateway 憑證用 |
 
 **不要**在 bucket 設生命週期規則（保存期限由 OpenObserve 自己刪，見 `retention.json`）。
 
@@ -78,29 +79,25 @@ printf 'Aa1-%s\n' "$(openssl rand -hex 20)"
 ALTER ROLE obs_app WITH PASSWORD 'Aa1-<40 碼 hex>';
 ```
 
-## 3. gateway 憑證
+## 3. CA 和 gateway 憑證
 
-agent 用 mTLS 連 gateway，gateway 需要一張我們 CA 簽的伺服器憑證，SAN 要包含 agent 連線用的 IP 或名稱。私鑰在 collector 上產生、不離開 collector；這台 Mac 只簽 CSR。
+agent 用 mTLS 連 gateway：agent 出示我們 CA 簽的 client 憑證，gateway 出示同一個 CA 簽的伺服器憑證。**簽憑證是 collector 的職責**：CA 放在 collector 的 `~/observability/pki/`（不進 git），gateway 的憑證在這裡產生，每台 agent 的憑證也在這裡簽（[agent-runbook.md](agent-runbook.md) 第 1 步，`scripts/pki.sh sign`）。
 
-在 collector 上產生私鑰和 CSR：
-
-```bash
-cd ~/observability && mkdir -p pki/gateway && chmod 700 pki && openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout pki/gateway/gateway.key -out pki/gateway/gateway.csr -subj "/CN=otel-gateway" && chmod 600 pki/gateway/gateway.key
-```
-
-在這台 Mac 上（repo 根目錄）把 CSR 拿回來、用 CA 簽、把憑證送回去（`SAN` 換成 agent 會連的所有 IP / 名稱；有效 825 天）：
+建 CA（只做一次，有效 10 年；`pki/` 已經有 `ca.key` 時會拒絕）：
 
 ```bash
-scp GCP_aoeskills:observability/pki/gateway/gateway.csr "$TMPDIR/gateway.csr" && printf 'subjectAltName=IP:34.146.61.17\nextendedKeyUsage=serverAuth\nkeyUsage=digitalSignature\n' > "$TMPDIR/gateway.ext" && openssl x509 -req -in "$TMPDIR/gateway.csr" -CA pki/ca.crt -CAkey pki/ca.key -CAcreateserial -days 825 -sha256 -extfile "$TMPDIR/gateway.ext" -out "$TMPDIR/gateway.crt" && scp "$TMPDIR/gateway.crt" pki/ca.crt GCP_aoeskills:observability/pki/gateway/
+cd ~/observability && scripts/pki.sh init
 ```
 
-回到 collector：刪掉 CSR，私鑰交給 `otel-collector` 容器的使用者（uid 10001，權限維持 600；不做的話 gateway 會因 `open /certs/gateway.key: permission denied` 一直重啟）：
+gateway 的私鑰和憑證（有效 825 天）：參數列出 agent 連線用的所有 IP / 名稱（SAN）：collector 的外部 IP，加上 collector 自己的 agent 用的 `127.0.0.1`。然後把私鑰交給 `otel-collector` 容器的使用者（uid 10001，權限維持 600；不做的話 gateway 會因 `open /certs/gateway.key: permission denied` 一直重啟），再重啟 gateway：
 
 ```bash
-cd ~/observability && rm pki/gateway/gateway.csr && sudo chown 10001:10001 pki/gateway/gateway.key
+cd ~/observability && scripts/pki.sh gateway 34.146.61.17 127.0.0.1 && sudo chown 10001:10001 pki/gateway/gateway.key && docker compose -f docker-compose.prod.yml restart otel-collector
 ```
 
-目前的 gateway 憑證：SAN `IP:34.146.61.17`，2029-01-15 到期。到期前、或 collector 的 IP / 名稱改變時，重做這一步，然後 `docker compose -f docker-compose.prod.yml restart otel-collector`。
+目前的 gateway 憑證：SAN `IP:34.146.61.17, IP:127.0.0.1`，2029-01-16 到期。到期前、或 collector 的 IP / 名稱改變時，重做 gateway 這一行（CA 不用重建，agent 不受影響）。
+
+**`pki/ca.key` 要備份**（第 8 步）。遺失的話就沒辦法再替 agent 簽憑證，只能重建 CA（移走 `pki/`，`init` + `gateway`），然後每台 agent 都重做 agent runbook 第 1 步。2026-10-15 就是這樣重建的：原本的 CA 放在一台 Mac 上，私鑰遺失了。
 
 ## 4. 防火牆（GCP）
 
@@ -173,6 +170,12 @@ cd ~/observability && set -a && . ./.prod.env && set +a && mkdir -p backups && f
 ```
 
 `backups/` 不進 git。已驗證（2026-10-13）：三個 DB 都能匯出。用完可以 `docker rmi postgres:18-alpine` 省磁碟。bucket 裡的資料不用另外備份，但 Postgres 遺失的話 bucket 裡的檔案就沒有索引（資料還在、查不到）。
+
+**CA**（建立後做一次，不用每次升級都做）：`backups/` 和 CA 在同一顆磁碟上，所以 CA 要另外存到 collector 以外的安全地方（例如密碼管理器）。`.env`、`.prod.env` 也一樣，它們同樣只存在 collector 上。在操作者的電腦上執行：
+
+```bash
+ssh GCP_aoeskills 'tar czf - -C observability pki/ca.key pki/ca.crt' > observability-ca-$(date +%Y%m%d).tgz
+```
 
 ## 9. 疑難排解
 

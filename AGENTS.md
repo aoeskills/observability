@@ -2,7 +2,9 @@
 
 OpenObserve + Grafana + OpenTelemetry Collector in Docker Compose (this folder), node_exporter as a Homebrew service on the Mac.
 Deployed since 2026-10-13: the collector runs in prod mode on the GCP VM (see "Deployment"); all state is in a bucket + one
-Postgres server chosen by env (see "Storage"). Agents so far: this Mac (`local-mac`) with sclaser-food on it.
+Postgres server chosen by env (see "Storage"). Agents (since 2026-10-15): the collector VM itself (`aoeskills-first-host`,
+project `observability`) and the sclaser VM (`instance-20260804-060650`, sclaser-food in Docker). This Mac's agent
+(`local-mac`) is off: its certificate died with the CA change of 2026-10-15.
 The old Prometheus + Grafana stack that ran on that VM (`~/monitoring`) was removed the same day; its configs are archived on
 the Mac in `backups/gcp-monitoring-configs-20261013.tar.gz`; its alert / threshold / Fleet Overview design lives on in
 `provisioner/grafana/`. The owner writes Chinese (Traditional); answer in the language they use.
@@ -44,7 +46,7 @@ service. One machine can be both (local mode). Use these words for roles in code
 | `otel-collector/config.yaml` | the gateway: OTLP gRPC + mTLS from agents → OpenObserve stream `ingest` (pipelines move it to one stream per `service.namespace`); scrapes postgres-exporter (thresholds, machine / service inventories) → Prometheus remote write → OpenObserve |
 | `retention.json` | days OpenObserve keeps each project's traces / logs (`sclaser_food`: 90); unlisted projects use `O2_RETENTION_DAYS` |
 | `agent/` | everything an agent runs (compose + config + `.env.example`; `docker-compose.mac.yml` for this Mac): apps' OTLP + local node_exporter + service probes (`blackbox.yml`, targets `probes/*.yml`) → gateway |
-| `scripts/pki.sh` | private CA, gateway certificate, one client certificate per machine → `pki/` (gitignored) |
+| `scripts/pki.sh` | run on the collector: private CA, gateway certificate, `sign` an agent's CSR → `pki/` (gitignored); `client` for local mode |
 | `provisioner/provision.py` | the runtime loop (every `DASHBOARD_SYNC_INTERVAL` s); stdlib only |
 | `provisioner/openobserve_dashboards.py` | OpenObserve "API Service" dashboard for one stream (SQL over traces / logs) |
 | `provisioner/grafana/` | Grafana generators ported from the GCP stack (`gen_fleet_overview.py`, `gen_node_details.py` + stock `node-exporter-full-1860.json`, `gen_alerts.py`), `o2_links.py` |
@@ -240,12 +242,14 @@ the collector exposes one entry point and needs no change when an agent is added
   it could only reach what the collector reaches (the Mac's app only while the Mac was the collector too).
 - **Gateway** (`otel-collector`): OTLP gRPC :4317 only, TLS with `client_ca_file` = a client certificate signed by our CA is
   required. Bound to `${OTEL_GATEWAY_BIND:-127.0.0.1}`; on the collector set `0.0.0.0` (open to any IP). Certificates from
-  `pki/gateway/` (SANs = every IP / name agents dial: locally `host.docker.internal`; remote the collector's public IP).
+  `pki/gateway/` (SANs = every IP / name agents dial: locally `host.docker.internal`; remote the collector's public IP + `127.0.0.1` for its own agent).
   On a Linux collector the `otel-collector` container's user (uid 10001) must own the key: `sudo chown 10001:10001 pki/gateway/gateway.key` (keep 0600),
   else "open /certs/gateway.key: permission denied" and a restart loop (seen 2026-10-13; Colima on the Mac ignores file owners).
-  Certificates (gateway and agents) are made by CSR: key + CSR on that host, Claude signs with the CA on this Mac, only
-  certificates travel back (commands in both runbooks; `scripts/pki.sh gateway|client` still generate key + cert on the Mac,
-  used for the local-mode gateway and `local-mac`).
+  **Signing is the collector's job** (owner, 2026-10-15): the CA lives in the collector's `pki/` (`scripts/pki.sh init`),
+  the gateway's key + cert are made there (`pki.sh gateway <SANs>`), and an agent's key + CSR are made on the agent and
+  signed by the collector (`ssh <agent> cat csr | ssh <collector> scripts/pki.sh sign | ssh <agent> 'cat > client.crt'`,
+  agent runbook step 1); keys never travel. `pki.sh client` (key + cert in one place) is for local mode only, where the
+  Mac is the collector with its own CA.
 - **Agent** (`agent/`, `otel-agent`): receives OTLP/HTTP from local apps on 4318, scrapes node_exporter on the machine (label `service_namespace` =
   `SERVICE_NAMESPACE`), detects `host.name` (see Data model) and puts it on everything: traces/logs (replacing the SDK's
   hostname / container id), metrics as `instance` (via service.instance.id) and `host_name`; adds `service.namespace` when
@@ -256,8 +260,8 @@ the collector exposes one entry point and needs no change when an agent is added
   "tls: certificate required"; client cert from another CA → rejected the same way; local-mac cert → accepted. Metrics, traces
   and logs from the Mac arrive via agent → gateway. Gateway stopped 40 s while sclaser-food served 3 requests → all 3 arrived
   after restart with their original timestamps.
-- **Revocation**: the collector has no CRL. To cut off one machine: new CA (`rm -r pki; pki.sh init`), new gateway cert, new
-  client certs for the machines that stay. Client certs are valid 2 years, the gateway cert 825 days, the CA 10 years.
+- **Revocation**: the collector has no CRL. To cut off one machine: on the collector a new CA (move `pki/` away, `pki.sh init`),
+  new gateway cert, new client certs for the machines that stay. Client certs are valid 2 years, the gateway cert 825 days, the CA 10 years.
 - **Apps in Docker on a Linux agent** (sclaser-food): the agent (host network) listens on the docker0 address
   (`AGENT_OTLP_BIND=172.17.0.1:4318`); app containers send to `http://host.docker.internal:4318` with
   `extra_hosts: host.docker.internal:host-gateway` (sclaser-food's compose has both). On Linux host-gateway = docker0's IP.
@@ -315,8 +319,10 @@ is gitignored) — migrations only go forward.
   invisible to the same query string (`[1m]` vs `[60s]` gave 6 vs 241 points). Real data arrives in order; for tests with
   back-filled data use equivalent but different durations.
 - JSON metrics ingest (`/api/{org}/ingest/metrics/_json`) lowercases metric names (`node_memory_MemTotal_bytes` →
-  `node_memory_memtotal_bytes`), and older than `ZO_INGEST_ALLOWED_UPTO` (default 5 h) is refused. Whether remote write keeps
-  `node_memory_MemAvailable_bytes` findable is unverified until the first Linux agent (macOS has no such metric).
+  `node_memory_memtotal_bytes`), and older than `ZO_INGEST_ALLOWED_UPTO` (default 5 h) is refused. **Remote write lowercases them
+  too** (found 2026-10-15 with the first Linux agents): `node_memory_MemAvailable_bytes` / `MemTotal_bytes` exist only as
+  `node_memory_memavailable_bytes` / `memtotal_bytes`, and PromQL with the mixed-case name finds nothing, so the Linux
+  memory branch of Fleet Overview / alerts / Node Exporter Details is empty (open: generators to use the lowercase names).
 - Dashboard variables of type `query_values` resolve asynchronously; panels show "no data" for a few seconds on first load.
 - `PUT /api/{org}/dashboards/{id}` needs `?folder=` and `&hash=` (the current hash from the list call); a dashboard's hash changes on every write.
 
@@ -324,14 +330,17 @@ is gitignored) — migrations only go forward.
 - **Collector**: `ssh GCP_aoeskills` = `aoeskills-first-host` (project `united-rope-297316`, zone asia-northeast1-b, external IP
   `34.146.61.17`, 2 vCPU / 1.9 GB RAM / 9.7 GB disk), repo in `~/observability`, `docker compose -f docker-compose.prod.yml`.
   Storage: GCS bucket `aoeskills_bucket-1` (S3 XML API + HMAC key), Cloud SQL Postgres on a private IP, user `obs_app` (db-init
-  created the three databases itself). Uses ~1.4 GB RAM (OpenObserve ~310 MB, Grafana ~345 MB, collector ~75 MB), ~2.4 GB disk free.
+  created the three databases itself). 2026-10-15 incl. its own agent: ~1.7 GB RAM used, ~280 MB available (OpenObserve ~410 MB,
+  Grafana ~350 MB, collector ~65 MB, otel-agent ~60 MB); disk 92 % (~750 MB free, over the default CRIT 85 %).
 - **Repo on the VM**: read-only GitHub deploy key `~/.ssh/observability_deploy` (`git config core.sshCommand` in the repo), so
   `git pull` works there without agent forwarding. Changes go Mac → push → `git pull` on the VM.
 - **Gateway**: GCP firewall rule `allow-otel-gateway` = tcp:4317 from 0.0.0.0/0 to network tag `otel-gateway` (owner: the Mac's IP
-  changes, the client certificate is the key); `.env` `OTEL_GATEWAY_BIND=0.0.0.0`; certificate SAN `34.146.61.17`, key created on
-  the VM (CSR signed with the CA on the Mac), owned by uid 10001.
-- **CA**: only on this Mac (`pki/ca.key`). The owner asks Claude to sign certificates for new agents (and the gateway):
-  key + CSR on that host, sign on this Mac, copy back only certificates (keys never travel).
+  changes, the client certificate is the key); `.env` `OTEL_GATEWAY_BIND=0.0.0.0`; certificate SANs `34.146.61.17` + `127.0.0.1`
+  (the VM's own agent dials 127.0.0.1:4317), key owned by uid 10001, until 2029-01-16.
+- **CA**: on the collector, `~/observability/pki/` (created 2026-10-15; the first CA lived on this Mac and its key was lost
+  when the Mac's clone was replaced, so every certificate was re-issued). Back up `pki/ca.key` off the VM (collector runbook step 8).
+- **Agents get no clone of this repo** (owner, 2026-10-15): only the files agent runbook step 2 copies, into `~/agent`,
+  driven over ssh from the operator's clone; the collector's own agent too (`~/agent`, not the repo's `agent/`).
 - **Access**: `ssh -N -L 8080:127.0.0.1:80 GCP_aoeskills` → http://localhost:8080/grafana/, or Tailscale
   http://aoeskills-first-host.tail8656d8.ts.net/grafana/ (`tailscale serve` forwards tailnet :80 to 127.0.0.1:80). Both verified.
 - **Passwords** (found while deploying): Cloud SQL requires lower + upper + digit + special, and `PG_PASSWORD` goes into a URL
@@ -341,16 +350,22 @@ is gitignored) — migrations only go forward.
   check a token without sending: `GET https://api.line.me/v2/bot/info` with `Authorization: Bearer <token>` (200 = valid). Test a
   contact point on Grafana 13: `POST /grafana/apis/notifications.alerting.grafana.app/v1beta1/namespaces/default/receivers/<base64url(name)>/test`
   with `{"integration": <the receiver's stored integration>, "alert": {...}}` (the old `/api/alertmanager/.../receivers/test` → 410).
-- **This Mac as an agent**: its local-mode collector is stopped (`docker compose -f docker-compose.local.yml down`, data kept);
+- **This Mac as an agent** (off since 2026-10-15, needs a certificate from the collector first): its local-mode collector is stopped (`docker compose -f docker-compose.local.yml down`, data kept);
   the agent runs alone: `cd agent && docker compose -f docker-compose.yml -f docker-compose.mac.yml up -d` (`agent/.env`:
   `HOST_NAME=local-mac`, `SERVICE_NAMESPACE=sclaser_food`, `GATEWAY_ENDPOINT=34.146.61.17:4317`; probes in
   `agent/probes/sclaser-food.yml`). sclaser-food runs in prod mode on the Mac (`npm run build && npm run start:daemon`, `.env.local`).
 - Verified 2026-10-13 end to end: Mac metrics / traces / logs / service probe → gateway → OpenObserve → GCS; Fleet Overview cards;
   Service DOWN pending after stopping sclaser-food, back to normal after restart; Machine DOWN briefly pending once when the
   agent's gRPC connection dropped (EOF, reconnected after 5 s) — watch for repeats (keepalive).
-- Still open: an agent on a real Linux VM (node-exporter profile, GCP host.name detection — the collector VM runs no agent yet);
-  the sclaser VM (`34.104.203.72`) still exposes node_exporter :9100 from the old stack — close it when it gets an agent;
-  retention actually deleting expired files.
+- **Linux agents, verified 2026-10-15** (both with the node-exporter profile): `aoeskills-first-host` (project
+  `observability`, gateway 127.0.0.1:4317, no probes) and the sclaser VM `instance-20260804-060650` (`34.104.203.72`, project
+  `sclaser_food`, `AGENT_OTLP_BIND=172.17.0.1:4318`, probe `http://127.0.0.1:3000/food/login`; the old stack's node_exporter
+  on 0.0.0.0:9100 (`~/monitoring`) is stopped, 9100 is now 127.0.0.1 only). Both `up` + `machine_registered`, the probe
+  `service_registered`; sclaser-food's new image (OTel preload) in Docker → traces in stream `sclaser_food` with
+  `service_host_name` = the VM; logs path checked with one OTLP test record (`service_name=agent-check`) because the app logs
+  only failed requests. Card names = the GCP instance names (on the sclaser VM the hostname is the same, so GCP detection vs
+  hostname is not told apart yet).
+- Still open: Linux memory panels / alerts (lowercased names, see gotchas); retention actually deleting expired files.
 
 ## Web access (Caddy)
 `caddy/Caddyfile`: 127.0.0.1:80, `/grafana*` → grafana:3000, `/openobserve*` → openobserve:5080, else 404; paths forwarded

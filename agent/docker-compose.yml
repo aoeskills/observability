@@ -1,5 +1,6 @@
 # The agent for one machine (see config.yaml), step by step in docs/agent-runbook.md. Settings come from agent/.env (copy
-# .env.example), the client certificate from agent/certs (scripts/pki.sh client <name>, then copy pki/clients/<name>/ there).
+# .env.example), the client certificate from agent/certs (key + CSR made on the machine, signed by the collector).
+# On a machine this directory is ~/agent with only the files the runbook copies, never a clone of the repo.
 #   Linux VM:   docker compose up -d     agent + node_exporter (profile node-exporter, on via COMPOSE_PROFILES in agent/.env)
 #               + blackbox-exporter (service probes, targets in agent/probes/*.yml)
 #   this Mac:   part of docker-compose.local.yml (with docker-compose.mac.yml); node_exporter is a Homebrew service there
