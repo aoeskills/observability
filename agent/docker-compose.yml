@@ -3,10 +3,17 @@
 #   Linux VM:   docker compose up -d     agent + node_exporter (profile node-exporter, on via COMPOSE_PROFILES in agent/.env)
 #               + blackbox-exporter (service probes, targets in agent/probes/*.yml)
 #   this Mac:   part of docker-compose.local.yml (with docker-compose.mac.yml); node_exporter is a Homebrew service there
+# Every container's own output (`docker logs`) is capped at 50 MB: 5 files of 10 MB, the oldest is dropped. It is only
+# the services' stdout (OpenObserve alone logs every request at INFO, ~1.2 GB/day uncapped), not the monitoring data.
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "5" }
+
 services:
   otel-agent:
     image: otel/opentelemetry-collector-contrib:latest
     container_name: otel-agent
+    logging: *logging
     restart: unless-stopped
     # root inside the container: the disk-queue volume is created root-owned and the client key is readable by its
     # owner only (0600); the image's default user (10001) could use neither. Machine agents commonly run as root.
@@ -32,6 +39,7 @@ services:
     # runs a node_exporter (remove COMPOSE_PROFILES from agent/.env, point NODE_EXPORTER_TARGET at it).
     image: prom/node-exporter:latest
     container_name: node-exporter
+    logging: *logging
     profiles: [node-exporter]
     restart: unless-stopped
     network_mode: host
@@ -45,6 +53,7 @@ services:
     # only; the agent scrapes it once a minute and pushes probe_success with everything else.
     image: prom/blackbox-exporter:latest
     container_name: blackbox-exporter
+    logging: *logging
     restart: unless-stopped
     network_mode: host
     command: ["--config.file=/etc/blackbox_exporter/config.yml", "--web.listen-address=127.0.0.1:9115"]

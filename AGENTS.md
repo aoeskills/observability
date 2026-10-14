@@ -26,6 +26,9 @@ service. One machine can be both (local mode). Use these words for roles in code
   → one Postgres server (three databases). The only volumes are OpenObserve's WAL, Grafana's plugin cache and the generated
   provisioning files. Start with `docker compose -f docker-compose.local.yml|docker-compose.prod.yml ...`; never put storage
   settings in `.env` (a value there overrides the included `.local.env` / `.prod.env`).
+- **Container logs are capped at 50 MB each** (`x-logging` in every compose file: 5 × 10 MB). OpenObserve logs every
+  request at INFO (~1.2 GB/day); uncapped it took 1.6 GB of the VM's 9.7 GB disk in 33 h (found 2026-10-15). These logs
+  are only the services' stdout, not monitoring data. Keep the cap on every new service.
 - Services decide their own request limits; this stack only has to survive whatever they send. The collector
   enforces that (see "Ingest limits"); keep those limits when changing the pipeline.
 

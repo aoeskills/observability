@@ -1,9 +1,16 @@
 # The bucket (RustFS, S3 API) and the Postgres server of local mode, as containers, so the stack needs no network.
 # Included by docker-compose.local.yml with .local.env, which also gives OpenObserve / Grafana the matching settings.
+# Every container's own output (`docker logs`) is capped at 50 MB: 5 files of 10 MB, the oldest is dropped. It is only
+# the services' stdout (OpenObserve alone logs every request at INFO, ~1.2 GB/day uncapped), not the monitoring data.
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "5" }
+
 services:
   bucket:
     image: rustfs/rustfs:1.0.1
     container_name: bucket
+    logging: *logging
     restart: unless-stopped
     environment:
       RUSTFS_ACCESS_KEY: ${O2_S3_ACCESS_KEY}
@@ -26,6 +33,7 @@ services:
     # OpenObserve never creates its bucket. One-shot: create it (an existing bucket is fine), signed with curl's SigV4.
     image: rustfs/rustfs:1.0.1
     container_name: bucket-init
+    logging: *logging
     restart: "no"
     environment:
       S3_USER: ${O2_S3_ACCESS_KEY}:${O2_S3_SECRET_KEY}
@@ -44,6 +52,7 @@ services:
     # The one Postgres server; db-init creates the openobserve, grafana and monitoring databases in it.
     image: postgres:17-alpine
     container_name: postgres
+    logging: *logging
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${PG_USER}

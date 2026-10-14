@@ -15,11 +15,18 @@ x-postgres: &pg_required
   PG_PASSWORD: "${PG_PASSWORD:?set in .prod.env / .local.env}"
   PG_SSLMODE: ${PG_SSLMODE:-require}
 
+# Every container's own output (`docker logs`) is capped at 50 MB: 5 files of 10 MB, the oldest is dropped. It is only
+# the services' stdout (OpenObserve alone logs every request at INFO, ~1.2 GB/day uncapped), not the monitoring data.
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "5" }
+
 services:
   db-init:
     # One-shot on every start: creates the three databases and the thresholds table if missing (db/init.sql).
     image: postgres:17-alpine
     container_name: db-init
+    logging: *logging
     restart: "no"
     environment:
       <<: *pg_required
@@ -36,6 +43,7 @@ services:
     # Stable releases only (no -rc). Migrations only go forward: back up Postgres before moving to a newer version.
     image: public.ecr.aws/zinclabs/openobserve:latest
     container_name: openobserve
+    logging: *logging
     restart: unless-stopped
     environment:
       ZO_ROOT_USER_EMAIL: "${ZO_ROOT_USER_EMAIL:?set in .env}"
@@ -76,6 +84,7 @@ services:
   otel-collector:
     image: otel/opentelemetry-collector-contrib:latest
     container_name: otel-collector
+    logging: *logging
     restart: unless-stopped
     command: ["--config=/etc/otelcol/config.yaml"]
     environment:
@@ -101,6 +110,7 @@ services:
     build: ./provisioner
     image: observability-provisioner
     container_name: provisioner
+    logging: *logging
     restart: unless-stopped
     environment:
       <<: *pg_required
@@ -131,6 +141,7 @@ services:
   grafana:
     image: grafana/grafana:latest
     container_name: grafana
+    logging: *logging
     restart: unless-stopped
     environment:
       <<: *pg_required
@@ -168,6 +179,7 @@ services:
     # on the collector reach it through an SSH tunnel (`ssh -N -L 8080:127.0.0.1:80 <host>`) or Tailscale.
     image: caddy:latest
     container_name: caddy
+    logging: *logging
     restart: unless-stopped
     ports:
       - 127.0.0.1:80:80
@@ -181,6 +193,7 @@ services:
     # alert rules cannot compare a PromQL series with a Postgres query.
     image: quay.io/prometheuscommunity/postgres-exporter:latest
     container_name: postgres-exporter
+    logging: *logging
     restart: unless-stopped
     environment:
       DATA_SOURCE_URI: ${PG_HOST}:${PG_PORT:-5432}/monitoring?sslmode=${PG_SSLMODE:-require}
