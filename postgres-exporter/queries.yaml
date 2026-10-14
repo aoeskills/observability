@@ -33,3 +33,21 @@ machine:
     - registered:
         usage: "GAUGE"
         description: "always 1"
+
+# The service inventory (table service) as service_registered{instance,service,service_namespace} = 1, the same way: a
+# registered service without a successful probe result is DOWN, whether its probes fail or stopped arriving.
+service:
+  query: "SELECT instance, service, service_namespace, 1 AS registered FROM service"
+  metrics:
+    - instance:
+        usage: "LABEL"
+        description: "host.name of the machine whose agent probes the service"
+    - service:
+        usage: "LABEL"
+        description: "label service of the probe target (agent/probes/*.yml)"
+    - service_namespace:
+        usage: "LABEL"
+        description: "project of the service when it was last seen"
+    - registered:
+        usage: "GAUGE"
+        description: "always 1"

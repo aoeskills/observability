@@ -1,6 +1,8 @@
 # Services on THIS machine that the agent checks once a minute (HTTP 200 = up; 5 failures in a row = Service DOWN alert,
 # card on Grafana's Fleet Overview). Copy to <anything>.yml in this directory: agent/probes/*.yml is gitignored, each
 # machine has its own. Changes are picked up within a minute, no restart needed. No .yml file = no service probes.
+# A service once probed stays in the collector's service inventory: removing it here makes it DOWN ("no data") until it
+# is retired with the button on its Fleet Overview card.
 # The probe runs on the machine itself, so the URL is what the machine reaches locally:
 #   Linux VM (host network):  http://127.0.0.1:<port>/...   (apps in Docker: their published port)
 #   this Mac (Colima):         http://host.docker.internal:<port>/...

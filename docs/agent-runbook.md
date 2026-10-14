@@ -153,7 +153,7 @@ curl -s '127.0.0.1:9115/probe?module=http_200&target=http://127.0.0.1:3000/login
 
 在 collector（Grafana / OpenObserve 網頁）：
 - Grafana **Fleet Overview** 約 1 分鐘內出現這台機器的卡片，名稱就是偵測到的機器名稱（GCP 上是 VM 名稱），套用預設門檻；
-- 有設服務探測的話，**Services** 出現該服務的卡片（`instance` = 這台機器，`target` = 探測的 URL）；
+- 有設服務探測的話，**Services** 出現該服務的卡片（`instance` = 這台機器，`target` = 探測的 URL），服務從此登記在服務清單裡；
 - app 有流量後，OpenObserve **Traces** 選 stream `<SERVICE_NAMESPACE>`，可以看到 `service_host_name = <機器名稱>` 的 trace；第一次看到新的 project 時，它的 stream 和儀表板會自動建立；
 - 這個 project 的保存天數如果不是預設 30 天，在 repo 的 `retention.json` 加一行。
 
@@ -166,7 +166,7 @@ curl -s '127.0.0.1:9115/probe?module=http_200&target=http://127.0.0.1:3000/login
 | agent log：`context deadline exceeded` / `Unavailable`，但 4317 連得上 | collector 那邊 OpenObserve 沒起來，gateway 寫不進去 → 見 collector runbook 的疑難排解 |
 | agent log：`certificate required` / `bad certificate` | `agent/certs` 少檔案，或憑證不是這個 CA 簽的（CA 重建過 → 重簽所有機器） |
 | 卡片沒出現，但 agent 沒有錯誤 | node_exporter 沒在跑或位址不對 → 檢查 `curl 127.0.0.1:9100/metrics`、`COMPOSE_PROFILES` / `NODE_EXPORTER_TARGET` |
-| Services 沒有卡片 / 一直 DOWN | `probes/*.yml` 的 URL 在這台機器上連不到或不是 200 → 用第 6 步的 curl 測；檔名要是 `.yml`；YAML 格式錯誤時 agent log 會有 `file_sd` 的錯誤 |
+| Services 沒有卡片 / 一直 DOWN | `probes/*.yml` 的 URL 在這台機器上連不到或不是 200 → 用第 6 步的 curl 測；檔名要是 `.yml`；YAML 格式錯誤時 agent log 會有 `file_sd` 的錯誤。卡片上有 `probe: no data` = 沒收到探測結果（agent、blackbox-exporter 或整台機器停了，或這個服務已從 `probes/*.yml` 移除） |
 | 卡片有，但沒有 traces | app 送不到 agent → 照第 5 步的測試指令檢查；也確認 OpenObserve 選的是對的 stream（= namespace） |
 | gateway 斷線一段時間 | 正常：agent 把資料暫存在磁碟佇列，最多重試 1 小時，連上後補送 |
 
@@ -176,9 +176,9 @@ curl -s '127.0.0.1:9115/probe?module=http_200&target=http://127.0.0.1:3000/login
 |---|---|
 | 改機器名稱 | GCP 上直接改 VM 名稱，agent 一分鐘內偵測到；有設 `HOST_NAME` 的機器改它後執行 `docker compose up -d`。新名稱的卡片下一次取樣就出現；舊名稱會變成紅色 DOWN 卡片（約 6 分鐘後發「機器沒有回應」），在它上面按 **Retire**。這台機器自己的門檻留在舊名稱下，Retire 會一起刪掉，需要的話在新卡片上用 ✎ 重設 |
 | 換 project | 改 `SERVICE_NAMESPACE`，執行 `docker compose up -d` |
-| 加 / 移除服務探測 | 改 `~/agent/probes/*.yml`，一分鐘內生效；移除的服務卡片約 5 分鐘後消失 |
-| 移除機器 | `docker compose down`（磁碟佇列保留；加 `-v` 連佇列一起刪），然後在 Fleet Overview 它的紅色 DOWN 卡片上按 **Retire**（從機器清單刪除、刪掉它自己的門檻，卡片和告警約 1 分鐘內消失）。沒按 Retire 就會一直顯示 DOWN 並告警：這就是「機器掛了」的偵測方式 |
-| 暫時停機維護 | 停機期間會顯示 DOWN 並告警，恢復後自動回到 UP。不要按 Retire（按了也沒關係，機器再送資料時會自動重新登記，只是門檻回到預設） |
+| 加 / 移除服務探測 | 改 `~/agent/probes/*.yml`，一分鐘內生效。移除的服務約 2 分鐘後變成紅色 DOWN 卡片（`probe: no data`，約 6 分鐘後發「服務沒有回應」），在它上面按 **Retire**（從服務清單刪除，卡片和告警約 1 分鐘內消失）。改服務名稱（`service` label）= 移除舊的 + 加新的；只改 URL 不用處理 |
+| 移除機器 | `docker compose down`（磁碟佇列保留；加 `-v` 連佇列一起刪），然後在 Fleet Overview 它的紅色 DOWN 卡片上按 **Retire**（從機器清單刪除、刪掉它自己的門檻，卡片和告警約 1 分鐘內消失）。它的服務各自在 Services 的 DOWN 卡片上按 **Retire**（機器的 Retire 不會連帶移除服務）。沒按 Retire 就會一直顯示 DOWN 並告警：這就是「機器 / 服務掛了」的偵測方式 |
+| 暫時停機維護 | 停機期間機器和它的服務都會顯示 DOWN 並告警，恢復後自動回到 UP。不要按 Retire（按了也沒關係，再送資料時會自動重新登記，只是機器的門檻回到預設） |
 | 更新 agent 設定 | 從 repo 重新複製 `config.yaml` / `docker-compose.yml` / `blackbox.yml`，執行 `docker compose up -d` |
 | 憑證到期（client 2 年） | 第 1 步重做（新私鑰 + CSR，這台 Mac 簽），執行 `docker compose restart otel-agent` |
 | 撤銷一台 agent | gateway 沒有撤銷清單：在這台 Mac 重建 CA（`scripts/pki.sh init`，先移走舊的 `pki/`），重簽 gateway 憑證（[collector-runbook.md](collector-runbook.md) 第 3 步）和每台保留的 agent（第 1 步），所有 agent 換上新的 `ca.crt` |

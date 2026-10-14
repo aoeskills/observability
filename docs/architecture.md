@@ -51,8 +51,8 @@ flowchart LR
     o2 -->|"SQL：metadata、file_list"| db_o2
     grafana -->|"SQL：自己的使用者、告警狀態"| db_g
     grafana -->|"SQL（datasource thresholds-db）<br/>讀寫門檻、Retire"| db_m
-    provisioner -->|"SQL：登記機器"| db_m
-    pgexp -->|"SQL：門檻、機器清單"| db_m
+    provisioner -->|"SQL：登記機器、服務"| db_m
+    pgexp -->|"SQL：門檻、機器 / 服務清單"| db_m
     dbinit -->|"SQL：建 DB / 表"| pg
     grafana -->|"HTTPS webhook<br/>Bearer token"| line
     user -->|"HTTP via SSH tunnel<br/>或 Tailscale"| caddy
@@ -68,15 +68,15 @@ flowchart LR
 | blackbox-exporter | app | HTTP GET（`agent/probes/*.yml` 的 URL） | 無 | 只有 200 算 UP |
 | otel-agent | gateway | **OTLP gRPC `:4317`** | **mTLS**：agent 出示我們 CA 簽的 client 憑證，並用 CA 驗證 gateway 憑證 | metrics + traces + logs（全部加上機器名稱 `host.name`）；斷線時存在磁碟佇列 |
 | gateway | OpenObserve | OTLP/HTTP（`/openobserve/api/default/v1/traces`、`/v1/logs`，寫進 stream `ingest`）、Prometheus remote write | basic auth（root 帳號，只有 gateway 持有） | 資料寫入。OpenObserve 的 pipeline 依 `service.namespace` 把 `ingest` 分流到同名 stream |
-| gateway | postgres-exporter | HTTP scrape `:9187`，每 15 秒 | 無（容器網路） | 門檻、機器清單 → metrics |
+| gateway | postgres-exporter | HTTP scrape `:9187`，每 15 秒 | 無（容器網路） | 門檻、機器 / 服務清單 → metrics |
 | OpenObserve | bucket | S3 API（HTTPS） | HMAC key | parquet 資料檔 |
 | OpenObserve | Postgres `openobserve` | SQL | 帳密（`PG_*`） | schema、file_list、使用者、儀表板 |
 | Grafana | OpenObserve | Prometheus 相容 API（PromQL） | basic auth | 儀表板、告警規則的資料 |
 | Grafana | Postgres `grafana` | SQL | 帳密 | Grafana 自己的使用者、告警狀態 |
-| Grafana | Postgres `monitoring` | SQL（datasource `thresholds-db`） | 帳密 | Fleet Overview 讀寫門檻、Retire 刪機器 |
+| Grafana | Postgres `monitoring` | SQL（datasource `thresholds-db`） | 帳密 | Fleet Overview 讀寫門檻、Retire 刪機器 / 服務 |
 | Grafana | LINE | HTTPS webhook（`api.line.me/v2/bot/message/push`） | Bearer token（`LINE_CHANNEL_ACCESS_TOKEN`） | 告警、彙整 |
-| provisioner | OpenObserve | REST API + PromQL | basic auth | 維持分流 pipeline、設定保存天數、同步 API Service 儀表板；查目前送資料的機器 |
-| provisioner | Postgres `monitoring` | SQL | 帳密 | 登記機器（機器清單） |
+| provisioner | OpenObserve | REST API + PromQL | basic auth | 維持分流 pipeline、設定保存天數、同步 API Service 儀表板；查目前送資料的機器、有探測結果的服務 |
+| provisioner | Postgres `monitoring` | SQL | 帳密 | 登記機器、服務（機器 / 服務清單） |
 | provisioner | Grafana | 檔案：共用 volume `grafana-provisioning` | – | 儀表板（Grafana 每 30 秒讀）、告警規則、datasource（啟動時讀） |
 | db-init | Postgres | SQL，每次啟動跑一次 | 帳密 | 建立缺少的 DB 和表 |
 | 瀏覽器 | Caddy | HTTP `127.0.0.1:80`，經 SSH tunnel 或 Tailscale | Grafana / OpenObserve 各自的登入 | 網頁 |

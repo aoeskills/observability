@@ -25,7 +25,13 @@ def named(expr):
     return f'label_join({expr}, "name", "", "instance")'
 
 # ---------------------------------------------------------------- queries
-CPU = f'100 - avg by(instance,job,service_namespace)(rate(node_cpu_seconds_total{{mode="idle",{P}}}[5m])) * 100'
+# CPU busy % = 1 - idle time / all CPU time, both over the same samples. Not `1 - avg(rate(idle))`: OpenObserve's rate()
+# divides by the whole [5m] window even when it holds less data (an agent that just started or stopped), which showed
+# 80-90 % right after an agent's start or stop (seen 2026-10-13); in the ratio that error cancels out. With a full window
+# the denominator is the number of cores, so the value is the same as before.
+CPU_BY = "instance,job,service_namespace"
+CPU = (f'100 * (1 - sum by({CPU_BY})(rate(node_cpu_seconds_total{{mode="idle",{P}}}[5m]))'
+       f' / sum by({CPU_BY})(rate(node_cpu_seconds_total{{{P}}}[5m])))')
 # Linux has MemAvailable; macOS does not: there "used" = active + wired + compressed (what Activity Monitor shows)
 MEM = (f'100 * (1 - node_memory_MemAvailable_bytes{{{P}}} / node_memory_MemTotal_bytes{{{P}}})'
        f' or 100 * (node_memory_active_bytes{{{P}}} + node_memory_wired_bytes{{{P}}} + node_memory_compressed_bytes{{{P}}})'
@@ -70,8 +76,18 @@ CROSS JOIN (VALUES ('cpu'), ('memory'), ('disk')) AS r(resource)
 LEFT JOIN usage_threshold d ON d.instance = '*' AND d.resource = r.resource
 LEFT JOIN usage_threshold t ON t.instance = i.instance AND t.resource = r.resource"""
 
-# services: probed by each machine's agent (agent/probes/*.yml); instance = that machine, target = the probed URL
-SERVICE_Q = f'max by(instance,service_namespace,service,target)(probe_success{{{P}}})'
+# Services: probed by each machine's agent (agent/probes/*.yml); instance = that machine, target = the probed URL. One card
+# per service with a probe result in the last 2 minutes (1 = UP, 0 = not HTTP 200), plus a DOWN card (0, label
+# probe="no data", with the Retire button) for every service in the inventory (table service, exported as
+# service_registered) without one: the same rule as the Service DOWN alert (gen_alerts.py SERVICE_DOWN, also for why [2m]
+# and why both sides of `unless` keep the same labels).
+PROBE = f'job="blackbox",{P}'
+SVC_KEY = "instance,service,service_namespace"
+SVC_LIVE = f'max by({SVC_KEY},target)(last_over_time(probe_success{{{PROBE}}}[2m]))'
+SVC_REGISTERED = f'(max by({SVC_KEY})(max_over_time(service_registered{{{P}}}[1m])) + 0)'  # [1m]: Retire shows within a minute
+SVC_SEEN = f'(max by({SVC_KEY})(last_over_time(probe_success{{{PROBE}}}[2m])) + 0)'
+SVC_SILENT = f'label_replace(({SVC_REGISTERED} unless {SVC_SEEN}) * 0, "probe", "no data", "", "")'
+SERVICE_Q = f'({SVC_LIVE} + 0) or {SVC_SILENT}'
 
 # ---------------------------------------------------------------- CSS
 CSS = """
@@ -122,6 +138,7 @@ CSS = """
 .card[data-v="0"]{border-left-color:#d93636}
 .card[data-v="1"] .pill.up{display:inline-block;background:#1f9d55}
 .card[data-v="0"] .pill.down{display:inline-block;background:#d93636}
+.card[data-probe="no data"] .btn[data-action="retire"]{display:inline-block}
 """
 
 MACHINE_HTML = """<div class="toolbar"><button class="btn" data-action="defaults" title="Thresholds used by machines that have no values of their own">&#9881; Default thresholds</button></div>
@@ -141,32 +158,27 @@ MACHINE_HTML = """<div class="toolbar"><button class="btn" data-action="defaults
 
 SERVICE_HTML = """<div class="cards">
 {{#each data}}
-<div class="card" data-v="{{Value}}">
-  <div class="head"><span class="name">{{service}}</span><span class="pill up">UP</span><span class="pill down">DOWN</span></div>
+<div class="card" data-v="{{Value}}" data-probe="{{probe}}" data-instance="{{instance}}" data-service="{{service}}">
+  <div class="head"><span class="name">{{service}}</span><span class="pill up">UP</span><span class="pill down">DOWN</span><button class="btn" data-action="retire" title="Remove this service from monitoring: no more DOWN card or alert">Retire</button></div>
   <div class="labels">{{#each this}}<span class="chip" data-k="{{@key}}"><b>{{@key}}</b>:{{this}}</span>{{/each}}</div>
 </div>
 {{/each}}
 </div>"""
 
 # ---------------------------------------------------------------- JS (After Content Ready)
-AFTER_RENDER = r"""
+# shared by both panels: SQL against the monitoring database through Grafana, role check, label chips
+COMMON_JS = r"""
 const el = context.element, g = context.grafana;
 const DS = {type: 'grafana-postgresql-datasource', uid: 'thresholds-db'};
-const LABEL = {cpu: 'CPU', memory: 'Memory', disk: 'Disk /'};
 const boot = window.grafanaBootData || {};
 const base = (boot.settings && boot.settings.appSubUrl) || '';
 const role = (boot.user && boot.user.orgRole) || '';
 const canEdit = role !== 'Viewer' && role !== 'None';
 
 // labels: drop empty ones (the table join gives every card every column, e.g. host_name exists on Memory but not on the
-// aggregated CPU / Disk series); name / host_name (= the card title) and otel_scope_* are hidden by CSS
+// aggregated CPU / Disk series, target on a service with results but not on a "no data" one); name / host_name (= the
+// card title) and otel_scope_* are hidden by CSS
 el.querySelectorAll('.chip').forEach(c => { if (!c.textContent.slice(c.dataset.k.length + 1).trim()) { c.remove(); } });
-
-// colour each card by comparing value with its thresholds
-el.querySelectorAll('.card[data-resource]').forEach(c => {
-  const v = parseFloat(c.dataset.value), w = parseFloat(c.dataset.warn), k = parseFloat(c.dataset.crit);
-  c.dataset.state = (isNaN(v) || isNaN(w) || isNaN(k)) ? 'unknown' : (v >= k ? 'crit' : (v >= w ? 'warn' : 'ok'));
-});
 
 async function runSql(sql) {
   const resp = await fetch(base + '/api/ds/query', {
@@ -184,6 +196,17 @@ async function runSql(sql) {
 }
 
 const okInstance = s => /^[A-Za-z0-9_.:*\-]+$/.test(s);
+const sqlText = s => "'" + String(s).replace(/'/g, "''") + "'";
+"""
+
+AFTER_RENDER = COMMON_JS + r"""
+const LABEL = {cpu: 'CPU', memory: 'Memory', disk: 'Disk /'};
+
+// colour each card by comparing value with its thresholds
+el.querySelectorAll('.card[data-resource]').forEach(c => {
+  const v = parseFloat(c.dataset.value), w = parseFloat(c.dataset.warn), k = parseFloat(c.dataset.crit);
+  c.dataset.state = (isNaN(v) || isNaN(w) || isNaN(k)) ? 'unknown' : (v >= k ? 'crit' : (v >= w ? 'warn' : 'ok'));
+});
 
 if (!document.getElementById('thr-modal-style')) {
   const st = document.createElement('style'); st.id = 'thr-modal-style';
@@ -293,6 +316,23 @@ el.querySelectorAll('button[data-action]').forEach(b => {
 });
 """
 
+SERVICE_AFTER = COMMON_JS + r"""
+el.querySelectorAll('button[data-action="retire"]').forEach(b => {
+  if (!canEdit) { b.disabled = true; b.title = 'Retiring a service requires the Editor or Admin role'; return; }
+  b.addEventListener('click', async ev => {
+    ev.preventDefault(); ev.stopPropagation();
+    const c = b.closest('.card'), inst = c.dataset.instance, svc = c.dataset.service;
+    if (!okInstance(inst) || !svc) { g.notifyError(['Invalid instance or service name']); return; }
+    if (!window.confirm('Retire ' + svc + ' on ' + inst + '?\n\nIt is removed from monitoring (no more DOWN card or alert). ' +
+                        'If its probe results arrive again it comes back.')) { return; }
+    try {
+      await runSql("DELETE FROM service WHERE instance = " + sqlText(inst) + " AND service = " + sqlText(svc) + " RETURNING service");
+      g.notifySuccess([svc + ' retired']); g.refresh();
+    } catch (e) { g.notifyError([String(e.message || e)]); }
+  });
+});
+"""
+
 
 def text_panel(pid, title, y, h, targets, html, empty, transformations, after=""):
     return {
@@ -329,7 +369,8 @@ dash = {
                    AFTER_RENDER),
         text_panel(2, "Services", 15, 5, [prom_t(SERVICE_Q)], SERVICE_HTML,
                    "No probed services match the selected namespace (agent/probes/*.yml on each machine).",
-                   [{"id": "sortBy", "options": {"sort": [{"field": "service"}, {"field": "instance"}]}}]),
+                   [{"id": "sortBy", "options": {"sort": [{"field": "service"}, {"field": "instance"}]}}],
+                   SERVICE_AFTER),
     ],
     "templating": {"list": [
         {"name": "ds", "label": "Datasource", "type": "datasource", "query": "prometheus",

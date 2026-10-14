@@ -96,7 +96,8 @@ services:
     # Every SYNC_INTERVAL s: OpenObserve's routing pipelines (one stream per service.namespace) and per-project retention
     # (retention.json), Grafana dashboards + alert rules into the grafana-provisioning volume, and one OpenObserve
     # "API Service" dashboard per traces stream (created / deleted with the stream; UI edits are reverted), and the machine
-    # inventory (table machine in the monitoring database: every machine seen, until retired from its Fleet Overview card).
+    # and service inventories (tables machine, service in the monitoring database: every machine / probed service seen,
+    # until retired from its Fleet Overview card).
     build: ./provisioner
     image: observability-provisioner
     container_name: provisioner
@@ -176,8 +177,8 @@ services:
 
   postgres-exporter:
     # Publishes the thresholds as metrics usage_threshold_warn / usage_threshold_crit{instance,resource} and the machine
-    # inventory as machine_registered{instance} (scraped by the collector), because Grafana alert rules cannot compare a
-    # PromQL series with a Postgres query.
+    # and service inventories as machine_registered / service_registered (scraped by the collector), because Grafana
+    # alert rules cannot compare a PromQL series with a Postgres query.
     image: quay.io/prometheuscommunity/postgres-exporter:latest
     container_name: postgres-exporter
     restart: unless-stopped

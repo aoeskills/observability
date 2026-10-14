@@ -4,8 +4,9 @@ Runs as the `provisioner` service, every SYNC_INTERVAL seconds:
   0. OpenObserve: keep the two routing pipelines in place (traces / logs from stream "ingest" -> the stream named after the
      record's service.namespace, i.e. one stream per project, created on its first record), and set each project stream's
      retention from retention.json (unlisted projects: OpenObserve's default, O2_RETENTION_DAYS)
-     and register every machine that is sending its status in the machine inventory (monitoring database, table machine):
-     a registered machine that goes quiet is DOWN (alert, red card) until it is retired from its Fleet Overview card
+     and register every machine that is sending its status in the machine inventory (monitoring database, table machine),
+     every probed service in the service inventory (table service): a registered machine that goes quiet, or service
+     whose probes fail or stop, is DOWN (alert, red card) until it is retired from its Fleet Overview card
   1. ask OpenObserve which traces streams exist (one per project)
   2. Grafana: write the provisioning tree into the shared volume (OUT_DIR, mounted read-only by Grafana at
      /etc/grafana/provisioning): the static files from grafana/provisioning/ plus the generated Fleet Overview,
@@ -142,22 +143,13 @@ def apply_retention(o2, streams_by_type):
                 log(f"o2       retention {stream_type}/{name} = {want or 'default'} days")
 
 
-# ----------------------------------------------------------------------------------------- machine inventory
+# ----------------------------------------------------------------------------------------- machine / service inventory
 def sql_text(value):
     return "'" + str(value).replace("'", "''") + "'"
 
 
-def register_machines(o2):
-    """Upsert every machine with a current status sample (its agent is sending) into table machine."""
-    seen = {r["metric"].get("instance"): r["metric"].get("service_namespace", "")
-            for r in o2.promql('max by(instance, service_namespace)(up{job="node"})')}
-    seen.pop(None, None)
-    if not seen:
-        return
-    rows = ", ".join(f"({sql_text(i)}, {sql_text(ns)})" for i, ns in sorted(seen.items()))
-    sql = (f"INSERT INTO machine (instance, service_namespace) VALUES {rows} "
-           "ON CONFLICT (instance) DO UPDATE SET service_namespace = EXCLUDED.service_namespace, last_seen = now() "
-           "RETURNING (xmax = 0) AS added, instance")
+def monitoring_sql(sql):
+    """Run one statement in the monitoring database; returns psql's unaligned output lines (column|column)."""
     env = dict(os.environ, PGHOST=os.environ["PG_HOST"], PGPORT=os.environ.get("PG_PORT", "5432"),
                PGUSER=os.environ["PG_USER"], PGPASSWORD=os.environ["PG_PASSWORD"],
                PGSSLMODE=os.environ.get("PG_SSLMODE", "require"), PGDATABASE="monitoring")
@@ -165,10 +157,35 @@ def register_machines(o2):
                           env=env, capture_output=True, text=True)
     if done.returncode:
         raise RuntimeError(done.stderr.strip()[-300:])
-    for line in done.stdout.split():
-        added, _, instance = line.partition("|")
+    return done.stdout.splitlines()
+
+
+def register(table, keys, promql):
+    """Upsert every series of promql (keys + service_namespace) into table; logs the rows that are new."""
+    seen = {}
+    for r in promql:
+        key = tuple(r["metric"].get(k) for k in keys)
+        if None not in key:
+            seen[key] = r["metric"].get("service_namespace", "")  # one row per key, even if two series share it
+    if not seen:
+        return
+    rows = ", ".join("(" + ", ".join(sql_text(v) for v in (*key, ns)) + ")" for key, ns in sorted(seen.items()))
+    sql = (f"INSERT INTO {table} ({', '.join(keys)}, service_namespace) VALUES {rows} "
+           f"ON CONFLICT ({', '.join(keys)}) DO UPDATE SET service_namespace = EXCLUDED.service_namespace, last_seen = now() "
+           "RETURNING (xmax = 0) AS added, " + " || ' ' || ".join(keys))
+    for line in monitoring_sql(sql):
+        added, _, name = line.partition("|")
         if added == "t":
-            log(f"machine  registered {instance}")
+            log(f"{table:8} registered {name}")
+
+
+def register_inventory(o2):
+    """Machines with a status sample in the last minute (their agent is sending), services with a probe result in the last
+    2 minutes: the same windows as the DOWN rules (gen_alerts.py). A bare selector would see the last sample for 5 more
+    minutes (PromQL lookback) and re-register a machine / service retired in that time."""
+    register("machine", ["instance"], o2.promql('max by(instance, service_namespace)(max_over_time(up{job="node"}[1m]))'))
+    register("service", ["instance", "service"],
+             o2.promql('max by(instance, service, service_namespace)(last_over_time(probe_success{job="blackbox"}[2m]))'))
 
 
 # ----------------------------------------------------------------------------------------- Grafana
@@ -261,9 +278,9 @@ def main():
     log(f"provisioning every {interval}s")
     while True:
         try:
-            register_machines(o2)
+            register_inventory(o2)
         except Exception as exc:
-            log(f"machine  registration failed: {exc}")
+            log(f"inventory registration failed: {exc}")
         try:
             ensure_pipelines(o2)
             by_type = {t: o2.streams(t) for t in NAMESPACE_FIELD}

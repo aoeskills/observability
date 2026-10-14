@@ -37,8 +37,8 @@ service. One machine can be both (local mode). Use these words for roles in code
 | `docker-compose.local-storage.yml` | local only: bucket (RustFS, console 127.0.0.1:9001), bucket-init (creates the bucket), postgres |
 | `docker-compose.prod.yml` | prod mode (the collector): includes `docker-compose.yml` with env `.prod.env` (copy `.prod.env.example`, gitignored) |
 | `.env` / `.local.env` / `.prod.env` | shared secrets (root, Grafana, LINE) / local storage settings (dev-only, committed) / prod storage settings |
-| `db/init.sql` | run by `db-init` on every start: creates databases `openobserve`, `grafana`, `monitoring` and table `usage_threshold` if missing |
-| `otel-collector/config.yaml` | the gateway: OTLP gRPC + mTLS from agents → OpenObserve stream `ingest` (pipelines move it to one stream per `service.namespace`); scrapes postgres-exporter (thresholds, machine inventory) → Prometheus remote write → OpenObserve |
+| `db/init.sql` | run by `db-init` on every start: creates databases `openobserve`, `grafana`, `monitoring` and tables `usage_threshold`, `machine`, `service` if missing |
+| `otel-collector/config.yaml` | the gateway: OTLP gRPC + mTLS from agents → OpenObserve stream `ingest` (pipelines move it to one stream per `service.namespace`); scrapes postgres-exporter (thresholds, machine / service inventories) → Prometheus remote write → OpenObserve |
 | `retention.json` | days OpenObserve keeps each project's traces / logs (`sclaser_food`: 90); unlisted projects use `O2_RETENTION_DAYS` |
 | `agent/` | everything an agent runs (compose + config + `.env.example`; `docker-compose.mac.yml` for this Mac): apps' OTLP + local node_exporter + service probes (`blackbox.yml`, targets `probes/*.yml`) → gateway |
 | `scripts/pki.sh` | private CA, gateway certificate, one client certificate per machine → `pki/` (gitignored) |
@@ -46,7 +46,7 @@ service. One machine can be both (local mode). Use these words for roles in code
 | `provisioner/openobserve_dashboards.py` | OpenObserve "API Service" dashboard for one stream (SQL over traces / logs) |
 | `provisioner/grafana/` | Grafana generators ported from the GCP stack (`gen_fleet_overview.py`, `gen_node_details.py` + stock `node-exporter-full-1860.json`, `gen_alerts.py`), `o2_links.py` |
 | `grafana/provisioning/` | the static part of Grafana's provisioning (datasources, dashboard provider); the provisioner copies it next to the generated files |
-| `postgres-exporter/queries.yaml` | thresholds + machine inventory → metrics |
+| `postgres-exporter/queries.yaml` | thresholds + machine / service inventories → metrics |
 | `node-exporter/` | flags for this Mac's brew service (`scripts/setup-node-exporter-macos.sh`); Linux agents run node_exporter from `agent/` |
 | `docs/collector-runbook.md` | the collector (zh): setup (env + password rules, gateway cert via CSR, firewall, deploy key), update, restart cost, backup, troubleshooting |
 | `docs/agent-runbook.md` | adding an agent (zh): certificate via CSR, `agent/.env`, probes, apps, checks, troubleshooting, rename / retire |
@@ -150,13 +150,31 @@ OpenObserve's Prometheus-compatible API (`/api/default/prometheus`, basic auth f
 - A label change on a scrape target leaves the old series "current" for ~5 min (remote write has no staleness markers), so
   joins on `instance` (`group_left(name)`) fail with "duplicate series" for 5 min and the alert rules error (execErrState →
   one alert message without labels). Avoid renaming labels on live targets.
-- **Machine inventory** (owner's decision 2026-10-13, the usual push-model "loss of signal" design): agents push, so a dead
-  machine is silence, not `up = 0`. The provisioner upserts every machine with a current `up` into `monitoring.machine`
-  (exported as `machine_registered{instance,service_namespace}`). Machine DOWN = registered without an `up == 1` sample in
-  the last minute, pending 4m; Fleet Overview shows a red DOWN card with a **Retire** button (deletes the machine row and
-  its own thresholds; a machine that sends again is re-registered). Both read `machine_registered` over `[1m]` so a retire
-  shows within a minute. Verified 2026-10-13: agent stopped → DOWN card in 1 min, alert firing after ~6 min; Retire via
-  the button's SQL → card + alert gone in 1 min; agent started → registered again, UP.
+- **Machine inventory** (owner's decision 2026-10-13, the usual push-model "loss of signal" design): agents push, so a
+  dead machine is silence, not `up = 0`. The provisioner upserts every machine with an `up` sample in the last minute into
+  `monitoring.machine` (exported as `machine_registered{instance,service_namespace}`). Same window as the DOWN rule: with
+  a bare `up` (5-min lookback) a machine retired within 5 minutes of its last sample was re-registered (fixed 2026-10-13).
+  Machine DOWN = registered without an `up == 1` sample in the last minute, pending 4m; Fleet Overview shows a red DOWN
+  card with a **Retire** button (deletes the machine row and its own thresholds; a machine that sends again is
+  re-registered). Both read `machine_registered` over `[1m]` so a retire shows within a minute. Verified 2026-10-13: agent
+  stopped → DOWN card in 1 min, alert firing after ~6 min; Retire via the button's SQL → card + alert gone in 1 min; agent
+  started → registered again, UP.
+- **Service inventory**, the same design (owner, 2026-10-13: services are pushed too, so they get the same treatment): the
+  provisioner upserts every `(instance, service)` with a `probe_success` in the last 2 minutes into `monitoring.service`
+  (exported as `service_registered{instance,service,service_namespace}`). Service DOWN = registered without a
+  `probe_success == 1` as its newest result in the last 2 minutes (`last_over_time(...[2m])`: probes run once a minute, a
+  `[1m]` window would sometimes be empty), pending 4m: the probe fails (not HTTP 200) **or** stops arriving. A dead
+  machine therefore fires Machine DOWN plus Service DOWN for each of its services (owner's choice). Fleet Overview shows a
+  red DOWN card labelled `probe: no data` with a **Retire** button for a registered service without results (a failing
+  service with results has no button: it would be re-registered within a minute). Retiring a machine leaves its services
+  (owner: retired separately). Identity = machine + `service` label: a changed URL updates the row, a renamed service is a
+  new one. Both sides of the `unless` keep exactly `(instance, service, service_namespace)`: OpenObserve ignores `on(...)`
+  there (rechecked 2026-10-13), and a `group_left` join for `target` would fail with many-to-many while a probe's URL
+  changes. Verified 2026-10-13 in local mode (`ALERTS_MODE=test` + fake-line): failing probe → registered, card 0, alert
+  firing; probe file removed → card `probe: no data`, alert stays firing (no "recovered" in between); Retire via the
+  button's SQL within 5 min of the last result → not re-registered, card gone, alert recovered; agent stopped → Machine
+  DOWN + Service DOWN firing, agent started → both recovered; URL changed → no DOWN (old and new target both shown UP for
+  ~30 s). The cards' HTML / Retire button not yet looked at in a browser.
 - Thresholds: database `monitoring`, table `usage_threshold`, edited from the Fleet Overview cards (datasource uid `thresholds-db`);
   postgres-exporter turns it into `usage_threshold_warn/crit{instance,resource}` (collector `honor_labels`) for the alert rules (Grafana cannot use a
   Prometheus-vs-Postgres expression as an alert condition — GCP finding).
@@ -184,8 +202,8 @@ the collector exposes one entry point and needs no change when an agent is added
 - **Pure push** (owner, 2026-10-13): the collector never connects to an agent or service. Service probes run on the
   service's own machine: the agent's blackbox-exporter (`agent/blackbox.yml`, only HTTP 200 = up) probes the targets in
   `agent/probes/*.yml` (file_sd, per machine, gitignored; `example.yml.sample`) once a minute and pushes `probe_success`
-  (kept: `probe_success|probe_http_status_code|probe_duration_seconds`). Service DOWN = `probe_success < 1` for 4m; a dead
-  machine stops sending probes too (no data = OK), so only Machine DOWN fires. The gateway's own blackbox job was removed:
+  (kept: `probe_success|probe_http_status_code|probe_duration_seconds`). Service DOWN: see "Service inventory" (failing or
+  silent for 5 minutes; a dead machine fires it for each of its services). The gateway's own blackbox job was removed:
   it could only reach what the collector reaches (the Mac's app only while the Mac was the collector too).
 - **Gateway** (`otel-collector`): OTLP gRPC :4317 only, TLS with `client_ca_file` = a client certificate signed by our CA is
   required. Bound to `${OTEL_GATEWAY_BIND:-127.0.0.1}`; on the collector set `0.0.0.0` (open to any IP). Certificates from
@@ -244,6 +262,12 @@ is gitignored) — migrations only go forward.
 - **`or` / `unless` match whole label sets**, not just the `on(...)` labels, once a side went through label_replace /
   label_join: reduce both sides with `max by(<labels>)(...)` first. Until 2026-10-13 this silently made the alert rules
   ignore per-machine thresholds (default always won); fixed in `gen_alerts.py`, verified with own / default / crit cases.
+- **`rate()` over a partly filled window** (an agent that just started or stopped) behaves as if divided by the whole
+  window: `1 - avg(rate(idle[5m]))` showed 80-90 % CPU for ~5 min after every agent start / stop and fired Usage over CRIT
+  (seen 2026-10-13 while the Mac slept and woke). CPU is therefore `1 - sum(rate(idle)) / sum(rate(all modes))` over the
+  same samples, where the error cancels (Fleet Overview + alerts; verified on the same data: 83 → 31 % at a start, 91 →
+  17 % at a stop, equal with a full window). The stock Node Exporter Details dashboard still has the old form (graph
+  edges only, no alerts).
 - Dashboard variables of type `query_values` resolve asynchronously; panels show "no data" for a few seconds on first load.
 - `PUT /api/{org}/dashboards/{id}` needs `?folder=` and `&hash=` (the current hash from the list call); a dashboard's hash changes on every write.
 

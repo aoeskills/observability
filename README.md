@@ -113,7 +113,7 @@ sclaser-food 的 session cookie 是加密的 `{sessionToken, userId, username}`�
 
 | 告警 | 條件 |
 |---|---|
-| 服務沒有回應 | 那台 agent 每分鐘探測一次（`agent/probes/*.yml`），連續 5 次不是 HTTP 200。整台 agent 停了則只發「機器沒有回應」 |
+| 服務沒有回應 | 曾經出現過的服務（那台 agent 每分鐘探測一次，`agent/probes/*.yml`）連續 5 分鐘不是 HTTP 200，或沒收到探測結果（agent 或整台機器停了：這時「機器沒有回應」和它上面每個服務的「服務沒有回應」都會發）。卡片變紅色 DOWN；不再探測的服務在它的「no data」卡片上按 **Retire** 移除 |
 | 機器沒有回應 | 曾經出現過的 agent 超過 1 分鐘沒送狀態，持續 4 分鐘（otel-agent、node_exporter 或整台機器停了）。卡片變紅色 DOWN；不再使用的機器在卡片上按 **Retire** 移除 |
 | 用量超過警告 / 嚴重門檻 | CPU、記憶體、磁碟 `/` 超過該機器的門檻（持續 2 分鐘） |
 | 門檻資料讀不到 | 門檻 DB 或 postgres-exporter 掛了 |

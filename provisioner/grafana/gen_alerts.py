@@ -52,7 +52,11 @@ def hhmm_plus(t, minutes):
     return f"{total // 60:02d}:{total % 60:02d}"
 
 
-CPU = 'round((100 - avg by(instance,job,service_namespace)(rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) * 10) / 10'
+# idle time / all CPU time over the same samples: see gen_fleet_overview.py CPU (OpenObserve's rate() over a partly empty
+# window made every agent start / stop look like 80-90 % CPU and fired Usage over CRIT)
+CPU_BY = "instance,job,service_namespace"
+CPU = (f'round(100 * (1 - sum by({CPU_BY})(rate(node_cpu_seconds_total{{mode="idle"}}[5m]))'
+       f' / sum by({CPU_BY})(rate(node_cpu_seconds_total[5m]))) * 10) / 10')
 # Linux MemAvailable, else macOS (active + wired + compressed) / total
 MEM = ('round((100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)'
        ' or 100 * (node_memory_active_bytes + node_memory_wired_bytes + node_memory_compressed_bytes) / node_memory_total_bytes) * 10) / 10')
@@ -86,6 +90,18 @@ def effective(level):
 # would count for 5 more minutes (remote write has no staleness markers).
 MACHINE_DOWN = ('(max by(instance,service_namespace)(max_over_time(machine_registered[1m])) + 0) unless '
                 '(max by(instance,service_namespace)(max_over_time(up{job="node"}[1m]) == 1) + 0)')
+
+# Services, the same way (owner, 2026-10-13: machines and services are both pushed, so both use an inventory): DOWN = a
+# service in the inventory (table service, exported as service_registered) without a successful probe result in the last
+# 2 minutes, i.e. its probes fail (not HTTP 200) or stopped arriving (agent, blackbox-exporter or the machine stopped; a
+# dead machine therefore fires Machine DOWN and Service DOWN for each of its services). [2m]: the agent probes once a
+# minute, so a [1m] window would sometimes hold no sample at all. last_over_time: the newest result counts, a failure is
+# not hidden by an older success. Both sides keep the same labels (instance, service, service_namespace): OpenObserve's
+# `unless` ignores on(...) and compares whole label sets (see the quirks above), and a join (group_left) for target
+# would fail with many-to-many while a probe's URL changes.
+SVC_KEY = "instance,service,service_namespace"
+SERVICE_DOWN = (f'(max by({SVC_KEY})(max_over_time(service_registered[1m])) + 0) unless '
+                f'(max by({SVC_KEY})(last_over_time(probe_success{{job="blackbox"}}[2m]) == 1) + 0)')
 
 CRIT_BREACH = f'{USAGE_BY} >= on(instance,resource) {effective("crit")}'
 WARN_BREACH = (f'({USAGE_BY} >= on(instance,resource) {effective("warn")})'
@@ -135,11 +151,12 @@ rules = [
          "{{ $labels.instance }}（專案 {{ $labels.service_namespace }}）沒有回應：超過 1 分鐘沒收到它的狀態（agent、node_exporter"
          " 或整台機器停了）。已經不用的機器，在 Fleet Overview 它的卡片上按 Retire。", pend=T["pend_down"]),
     # Services: probed by the agent on their own machine (agent/probes/*.yml) and pushed like everything else, so `instance`
-    # is the machine and `target` the probed URL. A dead machine stops sending probes too: then only Machine DOWN fires.
+    # is the machine that probes it. See SERVICE_DOWN.
     rule("service-down", "服務沒有回應 Service DOWN", "C",
-         [prom_q("A", 'probe_success{job="blackbox"}'), reduce_("B", "A"), thresh("C", "B", "lt", 1)],
-         "{{ $labels.service }}（在 {{ $labels.instance }}，專案 {{ $labels.service_namespace }}）沒有回應：{{ $labels.target }}"
-         " 連續 5 次不是 HTTP 200", pend=T["pend_down"]),
+         [prom_q("A", SERVICE_DOWN), reduce_("B", "A"), thresh("C", "B", "gt", 0)],
+         "{{ $labels.service }}（在 {{ $labels.instance }}，專案 {{ $labels.service_namespace }}）沒有回應：探測不是 HTTP 200，"
+         "或沒收到探測結果（agent、blackbox-exporter 或整台機器停了）。已經不用的服務，在 Fleet Overview 它的卡片上按 Retire。",
+         pend=T["pend_down"]),
     usage_rule("usage-warn", "用量超過警告門檻 Usage over WARN", WARN_BREACH, "警告", "warning"),
     usage_rule("usage-crit", "用量超過嚴重門檻 Usage over CRIT", CRIT_BREACH, "嚴重", "critical"),
     rule("thresholds-missing", "門檻資料讀不到 Thresholds unavailable", "C",
