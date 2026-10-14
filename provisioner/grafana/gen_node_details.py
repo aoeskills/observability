@@ -87,8 +87,22 @@ for v in d["templating"]["list"]:
         v["hide"] = 2  # no panel uses it; Instance no longer depends on it
 
 # ---- Availability section on top (works even when the machine is down)
+# Agents push, so a dead machine sends nothing (no up = 0 samples): DOWN = registered (machine_registered, the machine
+# inventory) without an up == 1 sample in the last minute, as in Fleet Overview and the Machine DOWN alert. OpenObserve has
+# no subqueries and its `or` / `unless` pick whole series in range queries (not per timestamp), so the stats count samples
+# over the range and the timeline merges up / registered per timestamp in Grafana (transformations).
 PROM = {"type": "prometheus", "uid": "${ds_prometheus}"}
 UPQ = 'up{job="$job",instance="$node"}'
+REGQ = 'machine_registered{instance="$node"}'
+UP_NOW = f'max by(instance)(max_over_time({UPQ}[1m]) == 1)'
+REG_NOW = f'max by(instance)(max_over_time({REGQ}[1m]))'
+STATUS_NOW = f'({UP_NOW} + 0) or ({REG_NOW} * 0 + 0)'  # instant: 1 UP, 0 DOWN
+# the agent's node job and the gateway's thresholds job (which exports machine_registered) both scrape every 15 s, so the
+# share of successful up samples among registered samples is the share of time UP; capped: up samples from before the
+# machine was registered would push it over 100
+SCRAPE_S = 15
+UP_SAMPLES = f'max by(instance)(sum_over_time({UPQ}[$__range]))'
+REG_SAMPLES = f'max by(instance)(count_over_time({REGQ}[$__range]))'
 UPDOWN = [{"type": "value", "options": {
     "1": {"text": "UP", "color": "green", "index": 0},
     "0": {"text": "DOWN", "color": "red", "index": 1}}}]
@@ -123,21 +137,31 @@ GR = [{"color": "green", "value": None}]
 new_panels = [
     {"id": 9001, "type": "row", "title": "Availability", "collapsed": False, "panels": [],
      "gridPos": {"x": 0, "y": 0, "w": 24, "h": 1}},
-    stat(9002, "Status now", UPQ, 0, "none",
-         [{"color": "red", "value": None}, {"color": "green", "value": 1}], mappings=UPDOWN, no_value="no data"),
-    stat(9003, "Availability (selected range)", f'100 * avg_over_time({UPQ}[$__range])', 6, "percent",
+    stat(9002, "Status now", STATUS_NOW, 0, "none",
+         [{"color": "red", "value": None}, {"color": "green", "value": 1}], mappings=UPDOWN, no_value="no data",
+         desc="UP = node_exporter answered in the last minute. DOWN = the machine is registered but sent nothing (or "
+              "node_exporter failed) in the last minute. 'no data' = not registered (retired or never seen)."),
+    stat(9003, "Availability (selected range)", f'clamp_max(100 * {UP_SAMPLES} / {REG_SAMPLES}, 100)', 6, "percent",
          [{"color": "red", "value": None}, {"color": "orange", "value": 95}, {"color": "green", "value": 99.9}], decimals=2,
-         desc="Share of scrapes that succeeded in the selected time range."),
-    stat(9004, "Downtime (selected range)", f'(1 - avg_over_time({UPQ}[$__range])) * $__range_s', 12, "s",
+         desc="Share of the time the machine was registered in the selected range during which it was UP "
+              "(successful node_exporter scrapes; a stopped or sleeping machine counts as down)."),
+    stat(9004, "Downtime (selected range)", f'clamp_min({SCRAPE_S} * ({REG_SAMPLES} - {UP_SAMPLES}), 0)', 12, "s",
          [{"color": "green", "value": None}, {"color": "red", "value": 1}], decimals=0,
-         desc="Estimated time the machine did not answer, from the share of failed scrapes."),
-    stat(9005, "Last seen up", f'time() - max_over_time(timestamp({UPQ} == 1)[$__range:15s])', 18, "s",
+         desc="Time in the selected range the machine was registered but not UP."),
+    stat(9005, "Last seen up", f'clamp_min(time() - max by(instance)(last_over_time(node_time_seconds{{job="$job",instance="$node"}}[$__range])), 0)', 18, "s",
          [{"color": "green", "value": None}, {"color": "orange", "value": 60}, {"color": "red", "value": 300}],
          decimals=0, no_value="never in this range",
-         desc="How long ago a scrape last succeeded. 'never in this range' = no successful scrape in the selected time range."),
+         desc="How long ago a scrape last succeeded (node_time_seconds = the machine's clock, sent only by a successful "
+              "scrape). 'never in this range' = no successful scrape in the selected time range."),
     {"id": 9006, "type": "state-timeline", "title": "Up / Down over time", "datasource": PROM,
+     "description": "Green = UP, red = registered but not UP, empty = not registered.",
      "gridPos": {"x": 0, "y": 5, "w": 24, "h": 5},
-     "targets": [{"datasource": PROM, "refId": "A", "expr": UPQ, "legendFormat": "{{instance}}"}],
+     # A: 1 while UP, B: 0 while registered; merged per timestamp (max) because OpenObserve's `or` cannot do it
+     "targets": [{"datasource": PROM, "refId": "A", "expr": UP_NOW, "legendFormat": "up"},
+                 {"datasource": PROM, "refId": "B", "expr": f'{REG_NOW} * 0', "legendFormat": "registered"}],
+     "transformations": [{"id": "joinByField", "options": {"byField": "Time", "mode": "outer"}},
+                         {"id": "calculateField", "options": {"mode": "reduceRow", "reduce": {"reducer": "max"},
+                                                              "alias": "${node}", "replaceFields": True}}],
      "fieldConfig": {"defaults": {"mappings": UPDOWN, "color": {"mode": "thresholds"},
                                   "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": None}, {"color": "green", "value": 1}]},
                                   "custom": {"fillOpacity": 85, "lineWidth": 0}}, "overrides": []},
@@ -151,7 +175,7 @@ new_panels.append({
     "id": 9010, "type": "stat", "title": "Name", "description": "The machine's name (host.name, HOST_NAME in its agent/.env).",
     "datasource": PROM, "gridPos": {"x": 0, "y": 1, "w": 6, "h": 4},
     "targets": [{"datasource": PROM, "refId": "A", "instant": True, "range": False, "legendFormat": "{{instance}}",
-                 "expr": 'up{job="$job",instance="$node"}'}],
+                 "expr": STATUS_NOW}],
     "fieldConfig": {"defaults": {"noValue": "no data", "color": {"mode": "fixed", "fixedColor": "blue"}}, "overrides": []},
     "options": {"colorMode": "none", "graphMode": "none", "textMode": "name",
                 "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False}}})

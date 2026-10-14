@@ -162,6 +162,12 @@ OpenObserve's Prometheus-compatible API (`/api/default/prometheus`, basic auth f
   Usage cards (CPU / Memory / Disk) show a value only while the machine is UP; otherwise they say "No data" (owner,
   2026-10-14). Before, CPU (a rate: needs two samples in its 5 min) vanished after an agent start / stop while Memory /
   Disk kept the last sample for 5 minutes. Checked 2026-10-14 against the VM's data at test instants (query results only).
+  Node Exporter Details' Availability row uses the same DOWN (it was written for the pull model, where a dead machine
+  still produced `up = 0`; with push it showed UP / 100 % / 0 s while the machine was silent): Status now = the instant
+  inventory query; availability = successful `up` samples ÷ `machine_registered` samples over the range (both scraped
+  every 15 s; a sleeping or stopped machine counts as down); downtime = the difference × 15 s; last seen up from
+  `node_time_seconds`. Checked 2026-10-14 on the VM's data (DOWN now: 0 / 50.8 % / 1770 s over 1 h, old panels UP /
+  100 % / 0 s); the timeline's transformations rendered in a scratch Grafana 13.2.3 with the same series.
 - **Service inventory**, the same design (owner, 2026-10-13: services are pushed too, so they get the same treatment): the
   provisioner upserts every `(instance, service)` with a `probe_success` in the last 2 minutes into `monitoring.service`
   (exported as `service_registered{instance,service,service_namespace}`). Service DOWN = registered without a
@@ -271,6 +277,13 @@ is gitignored) — migrations only go forward.
   same samples, where the error cancels (Fleet Overview + alerts; verified on the same data: 83 → 31 % at a start, 91 →
   17 % at a stop, equal with a full window). The stock Node Exporter Details dashboard still has the old form (graph
   edges only, no alerts).
+- **`or` / `unless` in range queries pick whole series, not timestamps**: `up or registered * 0` with equal labels returns
+  only the `up` points (no 0 where `up` is missing), `registered unless up` returns nothing once `up` has any point in
+  the range. Instant queries (Fleet Overview, alert rules) are correct. Graphs merge per timestamp in Grafana instead
+  (Node Exporter Details "Up / Down over time": outer join on Time + reduce row max). Found 2026-10-14.
+- **No subqueries**: `x[2h:1m]` on a selector → HTTP 400; on an expression only one point is evaluated (the old
+  "Last seen up" panel always showed 0). `timestamp(x)` returns the evaluation time, not the sample's. Use
+  `*_over_time` on plain selectors (sample counts) or a metric whose value is a time (`node_time_seconds`).
 - Dashboard variables of type `query_values` resolve asynchronously; panels show "no data" for a few seconds on first load.
 - `PUT /api/{org}/dashboards/{id}` needs `?folder=` and `&hash=` (the current hash from the list call); a dashboard's hash changes on every write.
 
