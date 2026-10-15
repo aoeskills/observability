@@ -104,9 +104,9 @@ services:
   provisioner:
     # Every SYNC_INTERVAL s: OpenObserve's routing pipelines (one stream per service.namespace) and per-project retention
     # (retention.json), Grafana dashboards + alert rules into the grafana-provisioning volume, and one OpenObserve
-    # "API Service" dashboard per traces stream (created / deleted with the stream; UI edits are reverted), and the machine
+    # "API Service" dashboard per traces stream (created / deleted with the stream; UI edits are reverted), the machine
     # and service inventories (tables machine, service in the monitoring database: every machine / probed service seen,
-    # until retired from its Fleet Overview card).
+    # until retired from its Fleet Overview card), and the LINE digest.
     build: ./provisioner
     image: observability-provisioner
     container_name: provisioner
@@ -122,7 +122,13 @@ services:
       # test only: ALERTS_MODE=test, or LINE_PUSH_URL=http://fake-line:8080/v2/bot/message/push (see AGENTS.md)
       ALERTS_MODE: ${ALERTS_MODE:-prod}
       LINE_PUSH_URL: ${LINE_PUSH_URL:-}
-      DIGEST_TIMES: ${DIGEST_TIMES:-05:00,17:00}  # scheduled digest, HH:MM in Asia/Taipei (gen_alerts.py)
+      # the LINE digest (provisioner/digest.py): sent to LINE, reads the firing alerts from Grafana's API
+      DIGEST_TIMES: ${DIGEST_TIMES:-05:00,17:00}  # HH:MM in DIGEST_TZ, besides the one 3 minutes after the start
+      DIGEST_TZ: ${DIGEST_TZ:-Asia/Taipei}
+      LINE_CHANNEL_ACCESS_TOKEN: ${LINE_CHANNEL_ACCESS_TOKEN:-}
+      LINE_USER_ID: ${LINE_USER_ID:-}
+      GRAFANA_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GRAFANA_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:?set in .env}"
     volumes:
       - ./provisioner:/provisioner:ro
       - ./grafana/provisioning:/static:ro

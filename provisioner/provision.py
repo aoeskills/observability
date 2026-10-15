@@ -14,11 +14,11 @@ Runs as the `provisioner` service, every SYNC_INTERVAL seconds:
      every 30 s; datasources and alert rules only on its start, which waits for the first pass (OUT_DIR/.ready).
   3. OpenObserve: one "API Service" dashboard per traces stream. Created when the stream appears, deleted when it
      is gone (retention or deletion), and overwritten when someone edits it in the UI.
+  4. the LINE digest, when it is due (digest.py: 3 minutes after the start and at DIGEST_TIMES; otherwise nothing is queried)
 Machines need nothing here: Grafana's dashboards and rules find them through PromQL at query time.
 Only the standard library is used, so it runs in a bare python image.
 """
 import base64
-import datetime
 import json
 import os
 import pathlib
@@ -30,6 +30,7 @@ import urllib.parse
 import urllib.request
 
 import openobserve_dashboards
+from digest import Digest
 
 HERE = pathlib.Path(__file__).resolve().parent
 GRAFANA_GEN = HERE / "grafana"
@@ -38,9 +39,6 @@ OUT_DIR = pathlib.Path(os.environ.get("OUT_DIR", "/out"))
 RETENTION_FILE = pathlib.Path(os.environ.get("RETENTION_FILE", "/retention.json"))
 FOLDER = "default"
 MARKER = "[managed: api-service/{}]"
-# one value per process: gen_alerts.py puts it on the heartbeat so each start sends a startup digest (see there)
-os.environ.setdefault("PROVISIONER_STARTED", datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
-                      .strftime("%Y-%m-%d %H:%M"))
 INGEST = "ingest"  # the collector writes every trace / log here; the pipelines move them out (otel-collector/config.yaml)
 # where the namespace ends up in each record: OpenObserve prefixes resource attributes with service_ in traces, not in logs
 NAMESPACE_FIELD = {"traces": "service_service_namespace", "logs": "service_namespace"}
@@ -69,6 +67,11 @@ class O2:
 
     def promql(self, query):
         return self.call("GET", "/prometheus/api/v1/query?" + urllib.parse.urlencode({"query": query}))["data"]["result"]
+
+    def query_range(self, query, end, minutes):
+        """one point per minute, the last one at end (unix seconds)"""
+        params = {"query": query, "start": end - (minutes - 1) * 60, "end": end, "step": 60}
+        return self.call("GET", "/prometheus/api/v1/query_range?" + urllib.parse.urlencode(params))["data"]["result"]
 
     def streams(self, stream_type):
         """name -> list item (with settings), without the ingest stream."""
@@ -274,6 +277,7 @@ def main():
             os.environ["ZO_ROOT_USER_EMAIL"], os.environ["ZO_ROOT_USER_PASSWORD"])
     interval = int(os.environ.get("SYNC_INTERVAL", "60"))
     streams, state = None, {}
+    digest = Digest(o2)
     (OUT_DIR / ".ready").unlink(missing_ok=True)  # healthy again after this start's first pass, not a previous one
     log(f"provisioning every {interval}s")
     while True:
@@ -281,6 +285,10 @@ def main():
             register_inventory(o2)
         except Exception as exc:
             log(f"inventory registration failed: {exc}")
+        try:
+            digest.run()
+        except Exception as exc:
+            log(f"digest   not sent ({exc}); trying again next pass")
         try:
             ensure_pipelines(o2)
             by_type = {t: o2.streams(t) for t in NAMESPACE_FIELD}

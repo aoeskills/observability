@@ -54,8 +54,9 @@ name. Owner-facing runbooks: `docs/collector-runbook.md`, `docs/agent-runbook.md
 | `scripts/pki.sh` | run on the collector: private CA, gateway certificate, `sign` an agent's CSR → `pki/` (gitignored); `client` for local mode |
 | `scripts/setup-node-exporter-macos.sh` | node_exporter as a Homebrew service on a macOS agent (flags in `node-exporter/`); Linux agents run node_exporter from `agent/` |
 | `provisioner/provision.py` | the runtime loop (every `DASHBOARD_SYNC_INTERVAL` s); stdlib only |
+| `provisioner/digest.py` | the LINE digest (start + `DIGEST_TIMES`): Grafana's firing alerts + the 12-hour report from OpenObserve |
 | `provisioner/openobserve_dashboards.py` | OpenObserve "API Service" dashboard for one stream (SQL over traces / logs; the span and field names it expects are in its docstring) |
-| `provisioner/grafana/` | Grafana generators (`gen_fleet_overview.py`, `gen_node_details.py` + stock `node-exporter-full-1860.json`, `gen_alerts.py`), `o2_links.py` |
+| `provisioner/grafana/` | Grafana generators (`gen_fleet_overview.py`, `gen_node_details.py` + stock `node-exporter-full-1860.json`, `gen_alerts.py`), `o2_links.py`, `alert_queries.py` (PromQL + names shared by the alert rules and the digest) |
 | `grafana/provisioning/` | the static part of Grafana's provisioning (datasources, dashboard provider); the provisioner copies it next to the generated files |
 | `postgres-exporter/queries.yaml` | thresholds + machine / service inventories → metrics |
 | `docs/collector-runbook.md` | the collector (zh): setup (env + password rules, gateway cert, opening 4317, deploy key), update, restart cost, backup, troubleshooting |
@@ -135,6 +136,7 @@ One name end to end: OpenTelemetry's resource attribute **`service.namespace`** 
   (marker `[managed: api-service/<stream>]` in the description; dashboards without it are left alone). The Service dropdown
   defaults to the stream's most frequent `service_name` over 7 days. A new stream gets its dashboard and Grafana links
   within one pass; a deleted stream loses both; an API edit of a managed dashboard is reverted on the next pass.
+  It also registers machines / services (see "Machine inventory") and sends the LINE digest when it is due (see "Digest").
 - Grafana re-reads dashboard files every 30 s; datasources and alert rules only on start. Grafana starts after the provisioner's
   first pass (healthcheck on `/out/.ready`, reset on each provisioner start). After changing `gen_alerts.py`:
   `docker compose -f docker-compose.<mode>.yml restart provisioner grafana` (provisioner first; it rewrites the rules file at start).
@@ -143,8 +145,7 @@ One name end to end: OpenTelemetry's resource attribute **`service.namespace`** 
 Split: Grafana for machine/service status, thresholds and LINE alerts; OpenObserve for storage and logs/traces. Why not
 all in OpenObserve: its HTML panels are sanitized and custom-chart JS is sandboxed (no `fetch`), so no ✎ threshold
 editing on cards; enrichment tables are whole-file CSV uploads, alerts cannot read them and gauges cannot draw them; its
-alerts stop evaluating while silenced and have no Alertmanager-style routes that re-send the current state, so no
-digest. Grafana has **no Prometheus of its own**: its datasource `openobserve` is OpenObserve's Prometheus-compatible API
+alerts stop evaluating while silenced. Grafana has **no Prometheus of its own**: its datasource `openobserve` is OpenObserve's Prometheus-compatible API
 (`/api/default/prometheus`, basic auth from `.env`).
 - Generator specifics forced by OpenObserve: `round(x * 10) / 10` instead of `round(x, 0.1)`, macOS memory branch
   (`or (active + wired + compressed) / total`), datasource uid `openobserve`. Grafana is served at `/grafana` behind Caddy
@@ -184,37 +185,35 @@ digest. Grafana has **no Prometheus of its own**: its datasource `openobserve` i
 - Thresholds: database `monitoring`, table `usage_threshold`, edited from the Fleet Overview cards (datasource uid `thresholds-db`);
   postgres-exporter turns it into `usage_threshold_warn/crit{instance,resource}` (collector `honor_labels`) for the alert rules (Grafana cannot use a
   Prometheus-vs-Postgres expression as an alert condition).
-- LINE credentials: container env from `.env`, read on **recreate** (`docker compose -f docker-compose.<mode>.yml up -d grafana`), not on restart.
-  A new non-empty token replaces the stored one, an empty value keeps the old one.
+- LINE credentials: container env from `.env` of Grafana (alerts) and the provisioner (digest), read on **recreate**
+  (`docker compose -f docker-compose.<mode>.yml up -d grafana provisioner`), not on restart. In Grafana a new non-empty
+  token replaces the stored one, an empty value keeps the old one.
 - Test without LINE: run `fake-line` (see `tools/fake_line_server.py`), then
   `LINE_PUSH_URL=http://fake-line:8080/v2/bot/message/push docker compose -f docker-compose.local.yml up -d --wait provisioner` and
   `docker compose -f docker-compose.local.yml restart grafana`; afterwards the same without `LINE_PUSH_URL`. `ALERTS_MODE=test` instead gives
-  1-minute timers and a fake token.
+  1-minute timers and a fake token (alerts and digest).
 - **Message texts**: alerts state only what the stack can confirm ("超過 5 分鐘沒有回應"), never guessed causes (the
   operator investigates); the thresholds alert is the exception and says what it is (collector-side data). Each rule
   has annotations `summary` (firing text), `resolved_title` + `resolved` (recovery, labels only: Grafana sends the last firing
   annotations) and `digest` (its line in the digest). Usage: only **CRIT** is sent at once; WARN appears only in the digest.
-  Resource names / units come from `RESOURCES` in `gen_alerts.py` (one entry per new usage kind). A rule removed from the
-  generator goes into `REMOVED_RULES` (`deleteRules`): file provisioning never deletes a rule that left the file.
-- **Digest** (at start + `DIGEST_TIMES`, default 05:00 / 17:00 Asia/Taipei): Alertmanager has no cron, so two routes
-  match `digest=all`, both flushing every minute but only inside a 2-minute active time interval, repeat 1h:
-  `digest-times` (`DIGEST_TIMES` env of the provisioner) and `startup-window` (one dated window 3–5 minutes after
-  the provisioner's start). Not group_wait for the startup one: Grafana evaluates a group's rules one after another, and
-  Alertmanager flushes a new group at once when an alert older than group_wait arrives (after a restart: everything
-  still firing, the previous heartbeat), so the digest would go out before the slower 12-hour rules are in.
-  The heartbeat carries label `started` = the provisioner's start time, because Grafana keeps its notification log in
-  Postgres and would otherwise treat the same alert set as already sent after a restart. A Grafana-only restart therefore
-  sends no startup digest; `up` (provisioner + Grafana) does. Grafana runs the previously stored alertmanager config for up to
-  ~1 min after start, so the first start after a config change can send one message in the old form.
-  Content: "目前有問題" (machine → service → usage CRIT → thresholds), then "📋 過去 12 小時彙整" with
-  sections 【機器】【服務】【用量超標】 (empty ones left out; all empty → one line "沒有停機，用量也沒有超標"), at most 20 lines
-  per section (LINE: 5000 characters per message, a longer one is refused as a whole).
-- **12-hour report rules** (`kind=report`, so only the digest routes take them): `machine-downtime` / `service-downtime`
-  (minutes registered − minutes up, only machines / services still registered; availability = 100 − minutes / 7.2) and
-  `usage-12h` (minutes ≥ warn, of them ≥ crit, highest value, latest thresholds). Range queries over 12 h at 1-minute steps,
-  reduced by Grafana (count / sum / max / last): OpenObserve's subqueries and range-mode set operators do not work (see
-  gotchas). Every query of a rule must return series: Grafana marks the whole rule NoData when any one is empty (an empty
-  "minutes over crit" would hide the usage report), hence `>= bool` and `up or registered * 0`.
+  Resource names / units come from `RESOURCES` in `alert_queries.py` (one entry per new usage kind). A rule removed from the
+  generator goes into `REMOVED_RULES` (`deleteRules`): file provisioning never deletes a rule that left the file (the same
+  for contact points, mute timings and templates: `REMOVED_CONTACT_POINTS` etc.).
+- **Digest** (`provisioner/digest.py`, not Grafana alerting since 2026-10-15): 3 minutes after the provisioner starts, then
+  at `DIGEST_TIMES` (default 05:00 / 17:00, `DIGEST_TZ` Asia/Taipei). The provisioner checks one in-memory `next_due` every
+  pass; before it, nothing is queried (the 12-hour report used to be a Grafana rule, recomputed every minute). Due → compose,
+  push to LINE, `next_due` = the next `DIGEST_TIMES` after now. A failed push keeps `next_due` (next pass tries again); a
+  failed computation is sent as "12 小時彙整產生失敗" (cause in the provisioner's log). No catch-up: a restart sends its
+  own startup digest instead. Needs the LINE env and `GRAFANA_ADMIN_USER` / `_PASSWORD` (basic auth for Grafana's
+  Alertmanager API; a password changed in Grafana's UI instead of `.env` breaks it).
+  Content: "目前有問題" = Grafana's firing `kind=problem` alerts, not silenced, each as its annotation `digest`
+  (machine → service → usage CRIT → thresholds), then "📋 過去 12 小時彙整" with sections 【機器】【服務】【用量超標】
+  (empty ones left out; all empty → one line "沒有停機，用量也沒有超標"), at most 20 lines per section, cut at 5000
+  characters (LINE refuses a longer message as a whole).
+- **12-hour report**: range queries over 12 h at 1-minute steps (720 points), the per-minute logic in Python, because
+  OpenObserve's subqueries and range-mode set operators do not work (see gotchas): downtime = minutes registered without
+  an up (machine) / successful probe (service) sample, only for machines / services still registered; availability =
+  100 − minutes / 7.2; usage = minutes ≥ that minute's warn threshold, of them ≥ crit, highest value, latest thresholds.
   To test with past data, back-fill through `/api/default/ingest/metrics/_json` (≤ 5 h old, see gotchas).
 
 ## Agent + gateway (mTLS)

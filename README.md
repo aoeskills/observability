@@ -107,14 +107,14 @@ docker compose -f docker-compose.local.yml down
 | 機器沒有回應 | 曾經出現過的 agent 超過 1 分鐘沒送狀態，持續 4 分鐘（otel-agent、node_exporter 或整台機器停了）。卡片變紅色 DOWN；不再使用的機器在卡片上按 **Retire** 移除 |
 | 用量超過嚴重門檻 | CPU、記憶體、磁碟 `/` 超過該機器的嚴重門檻（持續 2 分鐘）。超過警告門檻不即時通知，只列在彙整裡 |
 | Grafana 讀不到用量警告門檻資料 | 門檻 DB 或 postgres-exporter 掛了，用量告警暫時不會觸發 |
-| 彙整 | collector 啟動約 3 分鐘後一則，之後每天固定時刻（預設 05:00、17:00，Asia/Taipei，用 `DIGEST_TIMES` 改）；一定會送（沒收到 = 監控本身壞了）。內容：目前有問題的項目（或「全部正常」），以及過去 12 小時的【機器】【服務】停機分鐘與可用率、【用量超標】（超過警告 / 嚴重門檻幾分鐘、最高值）；沒有的段落不顯示 |
+| 彙整 | provisioner 啟動約 3 分鐘後一則，之後每天固定時刻（預設 05:00、17:00，Asia/Taipei，用 `DIGEST_TIMES` 改）；一定會送（沒收到 = 監控本身壞了；算不出來時送「12 小時彙整產生失敗」）。內容：目前有問題的項目（或「全部正常」），以及過去 12 小時的【機器】【服務】停機分鐘與可用率、【用量超標】（超過警告 / 嚴重門檻幾分鐘、最高值）；沒有的段落不顯示 |
 
-出事立即送一則、恢復時送一則（告警只寫確認得到的事實，例如多久沒回應，不猜原因）；問題持續中、或不到 5 分鐘的短暫中斷，由定時彙整提醒。LINE 免費方案每月 200 則，彙整本身每月約 60 則；新增會常常觸發的規則前先想配額。規則在 `provisioner/grafana/gen_alerts.py`。
+出事立即送一則、恢復時送一則（告警只寫確認得到的事實，例如多久沒回應，不猜原因）；問題持續中、或不到 5 分鐘的短暫中斷，由定時彙整提醒。LINE 免費方案每月 200 則，彙整本身每月約 60 則；新增會常常觸發的規則前先想配額。規則在 `provisioner/grafana/gen_alerts.py`（Grafana 發），彙整在 `provisioner/digest.py`（provisioner 發）。
 
-**設定 LINE**：在 collector 的 `.env` 填 `LINE_CHANNEL_ACCESS_TOKEN`、`LINE_USER_ID`，然後重建 Grafana（只 restart 不會讀到新的值）。收不到時怎麼查，見 collector runbook。
+**設定 LINE**：在 collector 的 `.env` 填 `LINE_CHANNEL_ACCESS_TOKEN`、`LINE_USER_ID`，然後重建 Grafana 和 provisioner（只 restart 不會讀到新的值）。收不到時怎麼查，見 collector runbook。
 
 ```bash
-docker compose -f docker-compose.prod.yml up -d grafana
+docker compose -f docker-compose.prod.yml up -d grafana provisioner
 ```
 
 **改門檻**：Fleet Overview 卡片上的 ✎（該機器）或右上 ⚙ Default thresholds（預設值）。存在資料庫的 `monitoring` DB，告警約 15 秒後就用新的值。

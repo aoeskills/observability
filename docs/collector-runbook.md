@@ -103,7 +103,7 @@ docker compose -f docker-compose.prod.yml ps -a
 - `docker logs --tail 10 provisioner` 有 `created pipeline route_traces_by_namespace` / `route_logs_by_namespace`，agent 送資料後有 `machine registered <機器名稱>`。
 - 網頁打得開（見 README 的「網頁」）；Fleet Overview 出現 agent 的卡片。
 - 約 20 分鐘後 bucket 裡出現 `files/default/metrics/...`；traces / logs 也一樣，但資料很少的 stream 會更晚（見下方「停機與重開的代價」）。
-- 啟動約 3～5 分鐘後，LINE 收到一則「監控啟動」彙整。
+- 啟動約 3 分鐘後，LINE 收到一則「監控啟動」彙整。
 
 collector 通常也當自己的 agent：照 [agent-runbook.md](agent-runbook.md) 做，`<agent>` 和 `<collector>` 是同一台，`GATEWAY_ENDPOINT=127.0.0.1:4317`。
 
@@ -134,7 +134,7 @@ cd ~/observability && git pull
 | 已存的資料 | 已上傳的在 bucket / 資料庫；尚未上傳的在 volume `openobserve-wal`，`down` 不刪 volume，重開後接著用 |
 | 儀表板、pipeline、門檻、機器清單 | 在資料庫或由 provisioner 重新產生，不受影響 |
 | 告警 | 停機期間不會有告警；告警狀態在資料庫，重開後接著評估。DOWN 告警要連續 4 分鐘，agent 補送很快，一般不會誤報 |
-| LINE | 重開約 3～5 分鐘後送一則啟動彙整（含過去 12 小時的停機，停機期間沒資料的時段不算停機）；已發過的告警不會重發 |
+| LINE | 重開約 3 分鐘後送一則啟動彙整（含過去 12 小時的停機，停機期間沒資料的時段不算停機）；停機期間錯過的定時彙整不補送；已發過的告警不會重發 |
 | 網頁 | 停機期間打不開，重開約 1～2 分鐘 |
 
 - **不要 `down -v`**：會刪掉尚未上傳到 bucket 的資料和 Grafana 外掛快取。尚未上傳的資料通常是最近約 20 分鐘；資料很少的 stream 可能更久，因為 WAL 檔過了 10 分鐘後要等「下一筆資料」進來才會封檔。
@@ -167,5 +167,5 @@ ssh <collector> 'tar czf - -C observability pki/ca.key pki/ca.crt' > observabili
 | agent 的 log：`context deadline exceeded` / `Unavailable`，但 4317 連得上 | gateway 收到了但寫不進 OpenObserve（OpenObserve 沒起來）→ 先看 `docker compose -f docker-compose.prod.yml ps` |
 | agent 的 log：timeout，連 4317 都連不上 | 防火牆（第 4 步）或 `OTEL_GATEWAY_BIND` 不是 `0.0.0.0` |
 | 磁碟一直變滿 | 容器 log 每個上限 50 MB（compose 的 `x-logging`）；新增服務也要套上。其餘多半是 OpenObserve 的 WAL 或 image |
-| 收不到 LINE | `docker logs grafana 2>&1 \| grep "Notify for alerts failed"`：`401` = token 無效。不送訊息就能檢查 token：`curl -s -H "Authorization: Bearer <token>" https://api.line.me/v2/bot/info`（200 = 有效）。改 `.env` 後要 `up -d grafana`。測試發送：Grafana 13 的 `POST /grafana/apis/notifications.alerting.grafana.app/v1beta1/namespaces/default/receivers/<base64url(contact point 名稱)>/test`，body 為 `{"integration": <該 contact point 現有的 integration>, "alert": {...}}`（舊的 `/api/alertmanager/.../receivers/test` 已移除） |
+| 收不到 LINE | 告警：`docker logs grafana 2>&1 \| grep "Notify for alerts failed"`；彙整：`docker logs provisioner 2>&1 \| grep digest`。`401` = token 無效。不送訊息就能檢查 token：`curl -s -H "Authorization: Bearer <token>" https://api.line.me/v2/bot/info`（200 = 有效）。改 `.env` 後要 `up -d grafana provisioner`。測試發送：Grafana 13 的 `POST /grafana/apis/notifications.alerting.grafana.app/v1beta1/namespaces/default/receivers/<base64url(contact point 名稱)>/test`，body 為 `{"integration": <該 contact point 現有的 integration>, "alert": {...}}`（舊的 `/api/alertmanager/.../receivers/test` 已移除） |
 | bucket 裡某個 stream 很晚才出現 | 資料很少時 WAL 要等下一筆資料才封檔，屬正常；查詢不受影響（會讀 WAL） |

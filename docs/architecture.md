@@ -31,8 +31,8 @@ flowchart LR
         gateway -->|"OTLP/HTTP → stream ingest<br/>Prometheus remote write<br/>basic auth"| o2
         gateway -->|"HTTP scrape<br/>每 15 秒"| pgexp
         grafana -->|"PromQL（Prometheus API）<br/>basic auth"| o2
-        provisioner -->|"REST API：pipeline、保存天數、儀表板<br/>PromQL：目前的機器<br/>basic auth"| o2
-        provisioner -->|"檔案（共用 volume）<br/>儀表板、告警規則、datasource"| grafana
+        provisioner -->|"REST API：pipeline、保存天數、儀表板<br/>PromQL：目前的機器、12 小時彙整<br/>basic auth"| o2
+        provisioner -->|"檔案（共用 volume）<br/>儀表板、告警規則、datasource<br/>HTTP：目前的告警（basic auth）"| grafana
         caddy -->|"HTTP /grafana/*"| grafana
         caddy -->|"HTTP /openobserve/*"| o2
     end
@@ -55,6 +55,7 @@ flowchart LR
     pgexp -->|"SQL：門檻、機器 / 服務清單"| db_m
     dbinit -->|"SQL：建 DB / 表"| pg
     grafana -->|"HTTPS webhook<br/>Bearer token"| line
+    provisioner -->|"HTTPS push<br/>Bearer token"| line
     user -->|"HTTP（SSH tunnel、VPN 等）"| caddy
 ```
 
@@ -74,10 +75,12 @@ flowchart LR
 | Grafana | OpenObserve | Prometheus 相容 API（PromQL） | basic auth | 儀表板、告警規則的資料 |
 | Grafana | Postgres `grafana` | SQL | 帳密 | Grafana 自己的使用者、告警狀態 |
 | Grafana | Postgres `monitoring` | SQL（datasource `thresholds-db`） | 帳密 | Fleet Overview 讀寫門檻、Retire 刪機器 / 服務 |
-| Grafana | LINE | HTTPS webhook（`api.line.me/v2/bot/message/push`） | Bearer token（`LINE_CHANNEL_ACCESS_TOKEN`） | 告警、彙整 |
+| Grafana | LINE | HTTPS webhook（`api.line.me/v2/bot/message/push`） | Bearer token（`LINE_CHANNEL_ACCESS_TOKEN`） | 告警 |
 | provisioner | OpenObserve | REST API + PromQL | basic auth | 維持分流 pipeline、設定保存天數、同步 API Service 儀表板；查目前送資料的機器、有探測結果的服務 |
 | provisioner | Postgres `monitoring` | SQL | 帳密 | 登記機器、服務（機器 / 服務清單） |
 | provisioner | Grafana | 檔案：共用 volume `grafana-provisioning` | – | 儀表板（Grafana 每 30 秒讀）、告警規則、datasource（啟動時讀） |
+| provisioner | Grafana | HTTP（Alertmanager API `/grafana/api/alertmanager/grafana/api/v2/alerts`） | basic auth（Grafana admin） | 彙整時讀目前觸發中的告警 |
+| provisioner | LINE | HTTPS（`api.line.me/v2/bot/message/push`） | Bearer token（`LINE_CHANNEL_ACCESS_TOKEN`） | 彙整（啟動後 3 分鐘、`DIGEST_TIMES`） |
 | db-init | Postgres | SQL，每次啟動跑一次 | 帳密 | 建立缺少的 DB 和表 |
 | 瀏覽器 | Caddy | HTTP `127.0.0.1:80`，經 SSH tunnel、VPN 或自己的反向代理 | Grafana / OpenObserve 各自的登入 | 網頁 |
 | Caddy | Grafana / OpenObserve | HTTP 反向代理，依路徑 `/grafana/*`、`/openobserve/*` | – | 網頁；Grafana 儀表板上的 OpenObserve 連結是相對路徑，同樣經過 Caddy |
