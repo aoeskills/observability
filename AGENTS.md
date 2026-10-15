@@ -302,8 +302,8 @@ back up Postgres (collector runbook step 8; `backups/` is gitignored) — migrat
   back-filled data use equivalent but different durations.
 - **Metric names are lowercased**, by JSON metrics ingest (`/api/{org}/ingest/metrics/_json`) and by remote write:
   `node_memory_MemAvailable_bytes` / `MemTotal_bytes` exist only as `node_memory_memavailable_bytes` /
-  `memtotal_bytes`, and PromQL with the mixed-case name finds nothing. Open: the Linux memory branch of Fleet Overview /
-  alerts / Node Exporter Details still uses the mixed-case names and is empty. JSON ingest also refuses data older than
+  `memtotal_bytes`, and PromQL with the mixed-case name finds nothing. Generators therefore write lowercase names
+  (`gen_node_details.py` lowercases every `node_*` name of the stock dashboard). JSON ingest also refuses data older than
   `ZO_INGEST_ALLOWED_UPTO` (default 5 h).
 - Dashboard variables of type `query_values` resolve asynchronously; panels show "no data" for a few seconds on first load.
 - `PUT /api/{org}/dashboards/{id}` needs `?folder=` and `&hash=` (the current hash from the list call); a dashboard's hash changes on every write.

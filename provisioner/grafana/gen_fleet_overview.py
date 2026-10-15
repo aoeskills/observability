@@ -32,8 +32,9 @@ def named(expr):
 CPU_BY = "instance,job,service_namespace"
 CPU = (f'100 * (1 - sum by({CPU_BY})(rate(node_cpu_seconds_total{{mode="idle",{P}}}[5m]))'
        f' / sum by({CPU_BY})(rate(node_cpu_seconds_total{{{P}}}[5m])))')
-# Linux has MemAvailable; macOS does not: there "used" = active + wired + compressed (what Activity Monitor shows)
-MEM = (f'100 * (1 - node_memory_MemAvailable_bytes{{{P}}} / node_memory_MemTotal_bytes{{{P}}})'
+# Linux has MemAvailable; macOS does not: there "used" = active + wired + compressed (what Activity Monitor shows).
+# OpenObserve stores metric names lowercased (MemAvailable -> memavailable); the mixed-case name finds nothing.
+MEM = (f'100 * (1 - node_memory_memavailable_bytes{{{P}}} / node_memory_memtotal_bytes{{{P}}})'
        f' or 100 * (node_memory_active_bytes{{{P}}} + node_memory_wired_bytes{{{P}}} + node_memory_compressed_bytes{{{P}}})'
        f' / node_memory_total_bytes{{{P}}}')
 DSEL = f'mountpoint="/",fstype!~"tmpfs|rootfs|overlay",{P}'

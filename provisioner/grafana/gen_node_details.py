@@ -2,11 +2,12 @@
 # (no round(x, 0.1): OpenObserve rejects it), served at the root path, macOS memory supported.
 """Build node-exporter-details.json from the stock 1860 JSON.
 
-Only change: the CPU Busy / RAM Used / Root FS Used gauges take their warn/crit thresholds
+Changes: metric names lowercased (OpenObserve stores them so); the CPU Busy / RAM Used / Root FS Used gauges take their warn/crit thresholds
 from PostgreSQL (table usage_threshold): the machine's own row, else the '*' default row.
 """
 import copy
 import json
+import re
 import sys
 
 import pathlib
@@ -29,6 +30,25 @@ d["uid"] = "node-exporter-details"
 d["title"] = "Node Exporter Details"
 d["id"] = None
 d["version"] = 1
+
+# OpenObserve lowercases metric names on ingest (node_memory_MemTotal_bytes -> node_memory_memtotal_bytes), and PromQL
+# with the mixed-case name finds nothing: lowercase every node_* name in the panels' and variables' queries.
+METRIC = re.compile(r"\bnode_\w+")
+
+
+def lower_metrics(o):
+    if isinstance(o, dict):
+        for k, v in o.items():
+            if k in ("expr", "query", "definition") and isinstance(v, str):
+                o[k] = METRIC.sub(lambda m: m.group(0).lower(), v)
+            else:
+                lower_metrics(v)
+    elif isinstance(o, list):
+        for v in o:
+            lower_metrics(v)
+
+
+lower_metrics(d)
 
 
 def walk(panels):

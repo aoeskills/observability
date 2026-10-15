@@ -68,8 +68,9 @@ def hhmm_plus(t, minutes):
 CPU_BY = "instance,job,service_namespace"
 CPU = (f'round(100 * (1 - sum by({CPU_BY})(rate(node_cpu_seconds_total{{mode="idle"}}[5m]))'
        f' / sum by({CPU_BY})(rate(node_cpu_seconds_total[5m]))) * 10) / 10')
-# Linux MemAvailable, else macOS (active + wired + compressed) / total
-MEM = ('round((100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)'
+# Linux MemAvailable, else macOS (active + wired + compressed) / total. OpenObserve stores metric names lowercased
+# (node_memory_MemAvailable_bytes -> node_memory_memavailable_bytes); the mixed-case name finds nothing.
+MEM = ('round((100 * (1 - node_memory_memavailable_bytes / node_memory_memtotal_bytes)'
        ' or 100 * (node_memory_active_bytes + node_memory_wired_bytes + node_memory_compressed_bytes) / node_memory_total_bytes) * 10) / 10')
 DSEL = 'mountpoint="/",fstype!~"tmpfs|rootfs|overlay"'
 DISK = (f'round((100 - 100 * max by(instance,job,service_namespace)(node_filesystem_avail_bytes{{{DSEL}}})'
