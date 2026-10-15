@@ -73,7 +73,7 @@ processors:
   # host.name = the machine's name, on everything this agent sends. Detected, first detector that knows it wins, and
   # re-detected every minute, so a VM renamed at the cloud provider shows its new name on the dashboards within a minute:
   #   env     OTEL_RESOURCE_ATTRIBUTES=host.name=<HOST_NAME>, only when HOST_NAME is set in agent/.env: machines without
-  #           cloud metadata, e.g. this Mac (its agent runs in a container whose hostname is random)
+  #           cloud metadata, e.g. macOS (the agent runs in a container whose hostname is random)
   #   gcp     the instance name from the GCE metadata server
   #   system  the OS hostname
   # override: true replaces the SDK's own host.name on traces / logs (an OS hostname, or a container id for apps in Docker).

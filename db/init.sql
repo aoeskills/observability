@@ -1,4 +1,4 @@
--- Run by the db-init service on every start, in both modes (local container or external Postgres such as Cloud SQL).
+-- Run by the db-init service on every start, in both modes (local container or external Postgres).
 -- Idempotent: creates what is missing and never overwrites rows. One Postgres server, one database per user:
 --   openobserve  OpenObserve metadata (stream schemas, file list = which parquet files are in the bucket, users, dashboards)
 --   grafana      Grafana's own database (users, alert state, provisioned dashboards and rules)

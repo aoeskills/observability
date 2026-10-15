@@ -1,7 +1,7 @@
 """OpenObserve dashboards (dashboard format version 8), built at runtime by provisioner/provision.py:
 one "API Service" dashboard per traces stream that exists in OpenObserve. Nothing is written to the repo.
 
-    python3 provisioner/openobserve_dashboards.py sclaser_food sclaser-food    # print one dashboard (stream, default service)
+    python3 provisioner/openobserve_dashboards.py my_project my-app    # print one dashboard (stream, default service)
 
 Only logs and traces live here; machines and service status are in Grafana (provisioner/grafana/).
   traces   one stream per project (OTLP, routed by the collector); Next.js request spans have next_span_type='BaseServer.handleRequest'

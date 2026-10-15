@@ -1,4 +1,4 @@
-# Adapted from the GCP ~/monitoring generator for this stack: Grafana reads metrics from OpenObserve's Prometheus API
+# Grafana reads metrics from OpenObserve's Prometheus API
 # (no round(x, 0.1): OpenObserve rejects it), served at the root path, macOS memory supported.
 """Grafana alerting provisioning (contact points, policies, rules), printed to stdout.
 provisioner/provision.py writes it to the provisioning volume; ALERTS_MODE picks the mode.

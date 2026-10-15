@@ -1,6 +1,6 @@
 # Prod mode, the collector (docs/collector-runbook.md):
 #   docker compose -f docker-compose.prod.yml up -d         docker compose -f docker-compose.prod.yml down
-# External bucket + Postgres (e.g. GCS + Cloud SQL) from .prod.env (copy .prod.env.example), shared secrets from .env.
+# External bucket (S3 API) + Postgres from .prod.env (copy .prod.env.example), shared secrets from .env.
 # The services refuse to start while a storage setting is missing. Monitored machines run agent/ on their own.
 include:
   - path: docker-compose.yml

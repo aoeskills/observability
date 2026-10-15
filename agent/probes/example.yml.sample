@@ -4,9 +4,9 @@
 # A service once probed stays in the collector's service inventory: removing it here makes it DOWN ("no data") until it
 # is retired with the button on its Fleet Overview card.
 # The probe runs on the machine itself, so the URL is what the machine reaches locally:
-#   Linux VM (host network):  http://127.0.0.1:<port>/...   (apps in Docker: their published port)
-#   this Mac (Colima):         http://host.docker.internal:<port>/...
-- targets: ["http://127.0.0.1:3000/login"]
+#   Linux (host network):  http://127.0.0.1:<port>/...   (apps in Docker: their published port)
+#   macOS:                 http://host.docker.internal:<port>/...
+- targets: ["http://127.0.0.1:3000/health"]
   labels:
-    service: sclaser-food             # card title, alert text
-    # service_namespace: sclaser_food # the project; default: SERVICE_NAMESPACE from agent/.env
+    service: my-app                   # card title, alert text
+    # service_namespace: my_project   # the project; default: SERVICE_NAMESPACE from agent/.env

@@ -1,4 +1,4 @@
-# Adapted from the GCP ~/monitoring generator for this stack: Grafana reads metrics from OpenObserve's Prometheus API
+# Grafana reads metrics from OpenObserve's Prometheus API
 # (no round(x, 0.1): OpenObserve rejects it), served at the root path, macOS memory supported.
 """Build node-exporter-details.json from the stock 1860 JSON.
 

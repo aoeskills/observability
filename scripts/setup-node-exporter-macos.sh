@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install node_exporter on this Mac as a Homebrew service, using the flags in node-exporter/node_exporter.args.
+# Install node_exporter on a macOS agent as a Homebrew service, using the flags in node-exporter/node_exporter.args.
 # Re-run after changing that file. node_exporter runs natively (not in Docker): in a container it would
 # report the Linux VM of Docker/Colima instead of the Mac.
 set -euo pipefail

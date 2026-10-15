@@ -4,13 +4,13 @@
 
 - **agent**（被收集端，任意台）：只跑 `agent/`。
 - **collector**（收集端，一台）：跑整套服務（`docker-compose.prod.yml`）。
-- 外部服務：bucket（S3 API）、Postgres（一台，三個 DB）、LINE。local 模式下 bucket（RustFS）和 Postgres 是 collector 上的容器（`docker-compose.local-storage.yml`），其他完全相同。
+- 外部服務：bucket（S3 API）、SQL 資料庫（目前用 Postgres，一台，三個 DB）、LINE。local 模式下 bucket（RustFS）和 Postgres 是 collector 上的容器（`docker-compose.local-storage.yml`），其他完全相同。
 - 方向只有 agent → collector（純 push）：collector 從不主動連 agent。
 
 ```mermaid
 flowchart LR
     subgraph agenthost["agent（每台一份）"]
-        app["app（如 sclaser-food）<br/>OpenTelemetry SDK"]
+        app["app<br/>OpenTelemetry SDK"]
         node["node-exporter<br/>127.0.0.1:9100"]
         bb["blackbox-exporter<br/>127.0.0.1:9115"]
         otelagent["otel-agent<br/>127.0.0.1:4318 · 磁碟佇列"]
@@ -47,7 +47,7 @@ flowchart LR
     user(("瀏覽器"))
 
     otelagent ==>|"OTLP gRPC :4317<br/>TLS + client 憑證（mTLS）<br/>metrics + traces + logs"| gateway
-    o2 -->|"S3 API（HTTPS、HMAC）<br/>parquet"| bucket
+    o2 -->|"S3 API（HTTPS、access key）<br/>parquet"| bucket
     o2 -->|"SQL：metadata、file_list"| db_o2
     grafana -->|"SQL：自己的使用者、告警狀態"| db_g
     grafana -->|"SQL（datasource thresholds-db）<br/>讀寫門檻、Retire"| db_m
@@ -55,7 +55,7 @@ flowchart LR
     pgexp -->|"SQL：門檻、機器 / 服務清單"| db_m
     dbinit -->|"SQL：建 DB / 表"| pg
     grafana -->|"HTTPS webhook<br/>Bearer token"| line
-    user -->|"HTTP via SSH tunnel<br/>或 Tailscale"| caddy
+    user -->|"HTTP（SSH tunnel、VPN 等）"| caddy
 ```
 
 ## 連線一覽
@@ -69,7 +69,7 @@ flowchart LR
 | otel-agent | gateway | **OTLP gRPC `:4317`** | **mTLS**：agent 出示我們 CA 簽的 client 憑證，並用 CA 驗證 gateway 憑證 | metrics + traces + logs（全部加上機器名稱 `host.name`）；斷線時存在磁碟佇列 |
 | gateway | OpenObserve | OTLP/HTTP（`/openobserve/api/default/v1/traces`、`/v1/logs`，寫進 stream `ingest`）、Prometheus remote write | basic auth（root 帳號，只有 gateway 持有） | 資料寫入。OpenObserve 的 pipeline 依 `service.namespace` 把 `ingest` 分流到同名 stream |
 | gateway | postgres-exporter | HTTP scrape `:9187`，每 15 秒 | 無（容器網路） | 門檻、機器 / 服務清單 → metrics |
-| OpenObserve | bucket | S3 API（HTTPS） | HMAC key | parquet 資料檔 |
+| OpenObserve | bucket | S3 API（HTTPS） | access key / secret key | parquet 資料檔 |
 | OpenObserve | Postgres `openobserve` | SQL | 帳密（`PG_*`） | schema、file_list、使用者、儀表板 |
 | Grafana | OpenObserve | Prometheus 相容 API（PromQL） | basic auth | 儀表板、告警規則的資料 |
 | Grafana | Postgres `grafana` | SQL | 帳密 | Grafana 自己的使用者、告警狀態 |
@@ -79,7 +79,7 @@ flowchart LR
 | provisioner | Postgres `monitoring` | SQL | 帳密 | 登記機器、服務（機器 / 服務清單） |
 | provisioner | Grafana | 檔案：共用 volume `grafana-provisioning` | – | 儀表板（Grafana 每 30 秒讀）、告警規則、datasource（啟動時讀） |
 | db-init | Postgres | SQL，每次啟動跑一次 | 帳密 | 建立缺少的 DB 和表 |
-| 瀏覽器 | Caddy | HTTP `127.0.0.1:80`，經 SSH tunnel 或 Tailscale | Grafana / OpenObserve 各自的登入 | 網頁 |
+| 瀏覽器 | Caddy | HTTP `127.0.0.1:80`，經 SSH tunnel、VPN 或自己的反向代理 | Grafana / OpenObserve 各自的登入 | 網頁 |
 | Caddy | Grafana / OpenObserve | HTTP 反向代理，依路徑 `/grafana/*`、`/openobserve/*` | – | 網頁；Grafana 儀表板上的 OpenObserve 連結是相對路徑，同樣經過 Caddy |
 
-collector 上只有 gateway 的 4317 對外開放，其餘都只綁 127.0.0.1 或只在容器網路裡。
+collector 上只有 gateway 的 4317 對外開放，其餘都只綁 127.0.0.1 或只在容器網路裡。圖上的 port 是預設值。

@@ -10,3 +10,6 @@ backups/
 /agent/.env
 /agent/certs/
 /agent/probes/*.yml
+
+# this deployment's own facts (hosts, IPs, cloud resources); see README
+/SITE.md
