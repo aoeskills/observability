@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fleet Card Preview</title>
+<style>
+:root{
+  --bg:#111217; --panel:#181b1f; --text:#ccccdc; --muted:rgba(204,204,220,.62);
+  --card:rgba(128,128,128,.10); --card-hover:rgba(128,128,128,.18); --line:rgba(128,128,128,.32);
+  --track:rgba(128,128,128,.26); --mk:rgba(255,255,255,.75); --chip:rgba(128,128,128,.22);
+  --ok:#1f9d55; --warn:#ed8129; --crit:#d93636; --accent:#5794f2; --primary:#3871dc;
+}
+:root[data-theme="light"]{
+  --bg:#f4f5f5; --panel:#ffffff; --text:#24292e; --muted:rgba(36,41,46,.6);
+  --card:rgba(128,128,128,.07); --card-hover:rgba(128,128,128,.14); --line:rgba(128,128,128,.3);
+  --track:rgba(128,128,128,.2); --mk:rgba(0,0,0,.55); --chip:rgba(128,128,128,.16);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.4 Inter,-apple-system,"Segoe UI","PingFang TC","Noto Sans TC",sans-serif}
+main{max-width:1200px;margin:0 auto;padding:24px 16px 48px}
+h1{font-size:20px;margin:0 0 4px} h2{font-size:15px;margin:32px 0 6px;font-weight:600}
+.lead{color:var(--muted);margin:0 0 16px;max-width:780px}
+.topbar{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:8px}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.seg button{border:0;background:transparent;color:inherit;padding:5px 12px;font:inherit;font-size:12px;cursor:pointer}
+.seg button[aria-pressed="true"]{background:var(--card-hover);font-weight:600}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:10px 12px 14px}
+.panel-title{font-size:13px;font-weight:600;margin:0 0 8px}
+.legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin:10px 0 0}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.dot{width:10px;height:10px;border-radius:2px;display:inline-block}
+.hint{font-size:12px;color:var(--muted);margin:0 0 10px}
+
+/* ---------------------------------------------------------------- the new card */
+.toolbar{display:flex;justify-content:flex-end;padding:0 2px 8px}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}
+.card{position:relative;display:flex;flex-direction:column;gap:10px;padding:12px 14px 14px;min-width:0;
+  border:1px solid var(--line);border-left:5px solid var(--ok);border-radius:8px;background:var(--card);color:inherit}
+.card:hover{background:var(--card-hover);border-color:var(--accent)}
+.card[data-state="warn"]{border-left-color:var(--warn)}
+.card[data-state="crit"],.card[data-up="0"]{border-left-color:var(--crit)}
+.stretch{position:absolute;inset:0;z-index:1;border-radius:8px}
+.head{display:flex;align-items:center;gap:8px;min-width:0}
+.title{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
+.name{font-weight:600;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pill{flex:none;padding:1px 9px;border-radius:10px;font-weight:700;font-size:11px;color:#fff;background:var(--ok)}
+.card[data-up="0"] .pill{background:var(--crit)}
+.btn{position:relative;z-index:2;flex:none;font:inherit;font-size:12px;line-height:1;padding:5px 9px;border-radius:6px;cursor:pointer;
+  border:1px solid var(--line);background:rgba(128,128,128,.12);color:inherit}
+.btn:hover{background:rgba(128,128,128,.3)}
+.btn.retire{border-color:var(--crit);color:var(--crit)}
+
+/* labels: one line; whatever does not fit collapses into "+N" (click to show all) */
+.chips{position:relative;z-index:2;display:flex;gap:4px;flex-wrap:nowrap;overflow:hidden;min-width:0}
+.chips.open{flex-wrap:wrap}
+.chip{flex:none;max-width:100%;font-size:11px;line-height:16px;padding:0 7px;border-radius:9px;background:var(--chip);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.chip b{font-weight:600;opacity:.7}
+.chip.proj{background:rgba(87,148,242,.18);color:var(--accent);max-width:60%}
+.chip.more{cursor:pointer;border:0;font:inherit;font-size:11px;color:inherit;font-weight:600}
+.chip.more:hover{background:rgba(128,128,128,.4)}
+
+.metrics{display:flex;flex-direction:column;gap:10px}
+.row{position:relative;z-index:2;display:grid;grid-template-columns:58px 1fr 54px;grid-template-rows:auto auto;
+  column-gap:10px;row-gap:3px;align-items:center;cursor:default}
+.lbl{font-size:12px;color:var(--muted)}
+.bar{position:relative;height:8px;border-radius:4px;background:var(--track)}
+.bar i{display:block;height:100%;max-width:100%;border-radius:4px;background:var(--ok)}
+.bar .mk{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--mk);border-radius:1px}
+.val{text-align:right;font-weight:600;font-size:15px;font-variant-numeric:tabular-nums}
+.val small{font-size:11px;font-weight:500;color:var(--muted);margin-left:1px}
+.amt{grid-column:2 / 4;font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row[data-state="warn"] .bar i{background:var(--warn)} .row[data-state="warn"] .val{color:var(--warn)}
+.row[data-state="crit"] .bar i{background:var(--crit)} .row[data-state="crit"] .val{color:var(--crit)}
+.row[data-state="nodata"] .bar{opacity:.45} .row[data-state="nodata"] .val{font-size:12px;font-weight:500;color:var(--muted)}
+.tip{display:none;position:absolute;right:0;bottom:calc(100% + 6px);z-index:5;white-space:nowrap;font-size:12px;
+  padding:5px 8px;border-radius:5px;background:#000c;color:#fff;pointer-events:none}
+.row:hover .tip{display:block}
+.downnote{font-size:12px;color:var(--crit)}
+
+/* ---------------------------------------------------------------- today's cards (for comparison) */
+.old .card{gap:8px}
+.old .oname{font-weight:600;font-size:14px}
+.old .ovalue{font-size:30px;font-weight:600;line-height:1}
+.old .ovalue small{font-size:14px;opacity:.7}
+.old .thr{font-size:12px;opacity:.85}
+.old .bar{height:10px}
+.old .chips{flex-wrap:wrap}
+
+/* ---------------------------------------------------------------- edit dialog */
+.back{position:fixed;inset:0;z-index:100;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;padding:16px}
+.back.open{display:flex}
+.dlg{width:400px;max-width:100%;border-radius:8px;padding:20px 22px;background:var(--panel);color:var(--text);
+  border:1px solid var(--line);box-shadow:0 10px 40px rgba(0,0,0,.5)}
+.dlg h3{margin:0 0 2px;font-size:18px;overflow-wrap:anywhere} .dlg .sub{color:var(--muted);font-size:12px;margin-bottom:14px}
+.trow{display:grid;grid-template-columns:70px 1fr 1fr;gap:10px;align-items:end;margin-bottom:10px}
+.trow .rn{font-weight:600;padding-bottom:5px;display:flex;flex-direction:column;line-height:1.2}
+.trow .src{font-size:10px;font-weight:500;color:var(--muted)}
+.trow label{font-size:12px;color:var(--muted);display:flex;flex-direction:column;gap:3px}
+.trow input{width:100%;padding:6px 8px;border-radius:5px;border:1px solid var(--line);background:transparent;color:inherit;font:inherit}
+.note{font-size:12px;color:var(--muted);margin:6px 0 14px}
+.dbtns{display:flex;gap:8px;justify-content:flex-end}
+.dbtns button{padding:7px 14px;border-radius:6px;cursor:pointer;border:1px solid var(--line);background:rgba(128,128,128,.15);color:inherit;font:inherit;font-size:13px}
+.dbtns .primary{background:var(--primary);border-color:var(--primary);color:#fff}
+.dbtns .spacer{flex:1}
+@media (max-width:480px){.trow{grid-template-columns:1fr 1fr}.trow .rn{grid-column:1/-1;padding:0}}
+</style>
+</head>
+<body>
+<main>
+  <div class="topbar">
+    <h1>Fleet Overview — 機器卡片預覽</h1>
+    <div class="seg" role="group" aria-label="Theme">
+      <button data-t="dark" aria-pressed="true">Dark</button><button data-t="light" aria-pressed="false">Light</button>
+    </div>
+  </div>
+  <p class="lead">一台機器一張卡。名稱下面是 project（<code>service_namespace</code>）。Memory / Space 下面是「已用 / 總量」，單位自動換（B / KB / MB / GB / TB，1024 進位）。
+    門檻只畫成長條上的兩條刻度；滑過某一列看數值，按 ✎ 看是這台自己的還是 default。</p>
+
+  <div class="panel">
+    <div class="panel-title">Machines</div>
+    <div class="toolbar"><button class="btn" id="defaults">⚙ Default thresholds</button></div>
+    <div class="cards" id="cards"></div>
+    <div class="legend">
+      <span><i class="dot" style="background:var(--ok)"></i>OK</span>
+      <span><i class="dot" style="background:var(--warn)"></i>≥ warn</span>
+      <span><i class="dot" style="background:var(--crit)"></i>≥ crit / DOWN</span>
+      <span>│ 刻度 = warn / crit</span>
+    </div>
+  </div>
+
+  <h2>假想情境：DOWN、剛開機、名稱很長、標籤很多</h2>
+  <p class="hint">線上的機器沒有這些情況，這裡用假資料看版面。標籤只排一行，放不下的收成「+N」，點一下展開。
+    註：現在機器只有 project 一個有意義的標籤，agent 也沒有加其他標籤的設定；這組是看「萬一以後加了」會不會撐爆。</p>
+  <div class="panel"><div class="cards" id="demo"></div></div>
+
+  <h2>對照：同一台機器現在的樣子（4 張卡）</h2>
+  <p class="hint">現在每張卡看得到的標籤固定是 3 個：instance（= 卡片名稱）、job（機器一律是 node）、service_namespace（project）。</p>
+  <div class="panel old"><div class="cards" id="old"></div></div>
+</main>
+
+<div class="back" id="back">
+  <div class="dlg" role="dialog" aria-modal="true" aria-labelledby="dlg-h">
+    <h3 id="dlg-h"></h3><div class="sub" id="dlg-sub"></div>
+    <div id="dlg-rows"></div>
+    <div class="note" id="dlg-note"></div>
+    <div class="dbtns"><button id="dlg-reset">Use default</button><span class="spacer"></span><button id="dlg-cancel">Cancel</button><button class="primary" id="dlg-save">Save</button></div>
+  </div>
+</div>
+
+<script>
+const GiB = 1024 ** 3, TiB = 1024 ** 4, MiB = 1024 ** 2;
+const DEF = {cpu: [75, 85], memory: [75, 85], disk: [75, 85]};   // the collector's '*' row today
+const LABEL = {cpu: 'CPU', memory: 'Memory', disk: 'Space'};
+// live values from the collector (2026-10-20): cpu %, [used, total] bytes (used = total - available, the same as the %)
+const machines = [
+  {name: 'aoeskills-e2-medium-1', ns: 'observability', up: 1, cores: 2, cpu: 12.6, thr: {cpu: [85, 95], memory: [85, 95]},
+   mem: [4109705216 - 1721282560, 4109705216], disk: [20891439104 - 11007057920, 20891439104]},
+  {name: 'ggininder', ns: 'deskpet', up: 1, cores: 2, cpu: 2.2,
+   mem: [2066808832 - 1390493696, 2066808832], disk: [10330861568 - 3752583168, 10330861568]},
+  {name: 'instance-20260804-060650', ns: 'sclaser_food', up: 1, cores: 2, cpu: 4.3,
+   mem: [4109701120 - 2464837632, 4109701120], disk: [31461457920 - 20598054912, 31461457920]},
+];
+// made-up cases; labels = hypothetical extra labels
+const demo = [
+  {name: 'local-mac', ns: 'sclaser_food', up: 0, cores: 10, mem: null, disk: null, cpu: null},
+  {name: 'just-started-vm', ns: 'deskpet', up: 1, cores: 2, cpu: null, mem: [1.6 * GiB, 1.9 * GiB], disk: [8.9 * GiB, 9.6 * GiB]},
+  {name: 'very-long-machine-name-from-a-cloud-provider-asia-northeast1-b-0001', ns: 'a_very_long_project_name_for_testing_overflow',
+   up: 1, cores: 64, cpu: 81.0, mem: [412 * MiB, 512 * MiB], disk: [5.9 * TiB, 7.3 * TiB],
+   labels: {env: 'production', region: 'asia-northeast1', team: 'platform', owner: 'ops-oncall', rack: 'b12', tier: 'backend', cost_center: 'rd-4521'}},
+  {name: 'nas-01', ns: 'infra', up: 1, cores: 4, cpu: 7.2, mem: [5.4 * GiB, 8 * GiB], disk: [11.8 * TiB, 12.7 * TiB],
+   labels: {env: 'office', rack: 'a1'}},
+];
+const pct = ([u, t]) => 100 * u / t;
+[...machines, ...demo].forEach(m => { m.v = {cpu: m.cpu, memory: m.up && m.mem ? pct(m.mem) : null, disk: m.up && m.disk ? pct(m.disk) : null}; });
+
+const UNITS = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+const unitOf = b => Math.min(UNITS.length - 1, Math.max(0, Math.floor(Math.log(b) / Math.log(1024))));
+const num = x => x >= 100 ? x.toFixed(0) : x.toFixed(1);
+// used / total in the total's unit: "2.1 / 3.9 GB"
+const amount = ([u, t]) => { const k = unitOf(t), d = 1024 ** k; return `${num(u / d)} / ${num(t / d)} ${UNITS[k]}`; };
+
+const thr = (m, r) => (m.thr && m.thr[r]) || DEF[r];
+const state = (v, [w, c]) => v == null ? 'nodata' : v >= c ? 'crit' : v >= w ? 'warn' : 'ok';
+const rank = {nodata: 0, ok: 0, warn: 1, crit: 2};
+const esc = s => String(s).replace(/[&<>"]/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[ch]));
+
+function card(m, i) {
+  let worst = 'ok';
+  const rows = ['cpu', 'memory', 'disk'].map(r => {
+    const [w, c] = thr(m, r), v = m.v[r], s = state(v, [w, c]);
+    if (rank[s] > rank[worst]) worst = s;
+    const own = !!(m.thr && m.thr[r]);
+    const val = v == null ? 'No data' : v.toFixed(1) + '<small>%</small>';
+    const why = !m.up ? 'machine DOWN' : 'fewer than two samples in 5 min (agent just started)';
+    const tip = v == null ? `No data: ${why}` : `${LABEL[r]} ${v.toFixed(1)}% · warn ≥ ${w}% · crit ≥ ${c}%${own ? ' (this machine)' : ' (default)'}`;
+    const bytes = r === 'memory' ? m.mem : m.disk;
+    const amt = r === 'cpu' ? `${m.cores} cores` : (m.up && bytes ? amount(bytes) : '—');
+    return `<div class="row" data-state="${s}"><span class="lbl">${LABEL[r]}</span>
+      <div class="bar"><i style="width:${v ?? 0}%"></i><b class="mk" style="left:${w}%"></b><b class="mk" style="left:${c}%"></b></div>
+      <span class="val">${val}</span><span></span><span class="amt">${amt}</span><span class="tip">${tip}</span></div>`;
+  }).join('');
+  const action = m.up ? `<button class="btn" data-edit="${m.name}" title="Edit thresholds">✎</button>`
+                      : `<button class="btn retire" title="Remove this machine from monitoring">Retire</button>`;
+  const extra = Object.entries(m.labels || {}).map(([k, v]) => `<span class="chip" title="${esc(k)}=${esc(v)}"><b>${esc(k)}</b> ${esc(v)}</span>`).join('');
+  return `<div class="card" data-up="${m.up}" data-state="${worst}">
+    <a class="stretch" href="#" title="Open ${esc(m.name)} in Node Exporter Details" onclick="return false"></a>
+    <div class="head"><div class="title"><span class="name" title="${esc(m.name)}">${esc(m.name)}</span>
+        <div class="chips"><span class="chip proj" title="project: ${esc(m.ns)}">${esc(m.ns)}</span>${extra}</div></div>
+      <span class="pill">${m.up ? 'UP' : 'DOWN'}</span>${action}</div>
+    <div class="metrics">${rows}</div>
+    ${m.up ? '' : '<div class="downnote">超過 1 分鐘沒有回報</div>'}
+  </div>`;
+}
+document.getElementById('cards').innerHTML = machines.map(card).join('');
+document.getElementById('demo').innerHTML = demo.map(card).join('');
+
+// one line of labels; the ones that do not fit go behind "+N"
+function fitChips(box) {
+  box.classList.remove('open');
+  box.querySelectorAll('.more').forEach(x => x.remove());
+  const chips = [...box.querySelectorAll('.chip')];
+  chips.forEach(c => c.hidden = false);
+  if (box.scrollWidth <= box.clientWidth) return;
+  const more = document.createElement('button'); more.className = 'chip more'; box.appendChild(more);
+  let hidden = [];
+  for (let k = chips.length - 1; k > 0 && box.scrollWidth > box.clientWidth; k--) {   // never hide the project chip
+    chips[k].hidden = true; hidden.unshift(chips[k]); more.textContent = '+' + hidden.length;
+  }
+  more.title = hidden.map(c => c.title).join('\n');
+  more.addEventListener('click', e => { e.stopPropagation(); box.classList.add('open'); hidden.forEach(c => c.hidden = false); more.remove(); });
+}
+const fitAll = () => document.querySelectorAll('#cards .chips, #demo .chips').forEach(fitChips);
+fitAll(); new ResizeObserver(fitAll).observe(document.querySelector('main'));
+
+// today's layout for the same machine
+const m = machines[0], chips = `<div class="chips"><span class="chip"><b>instance</b>:${m.name}</span><span class="chip"><b>job</b>:node</span><span class="chip"><b>service_namespace</b>:${m.ns}</span></div>`;
+const oldCard = (title, body, st) => `<div class="card" data-state="${st}"><div class="head"><span class="oname" style="flex:1">${title}</span><button class="btn">✎ Edit</button></div>${body}${chips}</div>`;
+document.getElementById('old').innerHTML =
+  `<div class="card"><div class="head"><span class="oname" style="flex:1">${m.name} Status</span></div><div><span class="pill">UP</span></div>${chips}</div>` +
+  ['cpu', 'memory', 'disk'].map(r => {
+    const [w, c] = thr(m, r), v = m.v[r], s = state(v, [w, c]);
+    const col = s === 'ok' ? 'var(--ok)' : s === 'warn' ? 'var(--warn)' : 'var(--crit)';
+    return oldCard(`${m.name} ${r === 'disk' ? 'Disk /' : LABEL[r]}`,
+      `<div class="ovalue" style="color:${s === 'ok' ? 'inherit' : col}">${v.toFixed(1)}<small>%</small></div>
+       <div class="bar"><i style="width:${v}%;background:${col}"></i><b class="mk" style="left:${w}%"></b><b class="mk" style="left:${c}%"></b></div>
+       <div class="thr">warn ≥ ${w}% · crit ≥ ${c}%${m.thr && m.thr[r] ? '' : ' <span class="chip" style="display:inline">default</span>'}</div>`, s);
+  }).join('');
+
+// edit dialog: one dialog for all three thresholds of a machine
+const back = document.getElementById('back');
+function openDlg(title, sub, values, note, reset, own = {}) {
+  document.getElementById('dlg-h').textContent = title;
+  document.getElementById('dlg-sub').textContent = sub;
+  document.getElementById('dlg-note').textContent = note;
+  document.getElementById('dlg-reset').style.visibility = reset ? 'visible' : 'hidden';
+  document.getElementById('dlg-rows').innerHTML = ['cpu', 'memory', 'disk'].map(r =>
+    `<div class="trow"><span class="rn">${LABEL[r]}<span class="src">${own[r] === undefined ? '' : own[r] ? 'this machine' : 'default'}</span></span><label>Warn ≥ %<input type="number" min="0" max="100" value="${values[r][0]}"></label>` +
+    `<label>Crit ≥ %<input type="number" min="0" max="100" value="${values[r][1]}"></label></div>`).join('');
+  back.classList.add('open');
+}
+document.querySelectorAll('[data-edit]').forEach(b => b.addEventListener('click', () => {
+  const mm = [...machines, ...demo].find(x => x.name === b.dataset.edit), vals = {}, src = {}, own = !!mm.thr;
+  ['cpu', 'memory', 'disk'].forEach(r => { vals[r] = thr(mm, r); src[r] = !!(mm.thr && mm.thr[r]); });
+  openDlg(mm.name, mm.ns + ' · thresholds', vals,
+    own ? 'Saving stores all three for this machine. "Use default" removes this machine\'s values.'
+        : 'This machine uses the default values. Saving creates values for this machine only.', own, src);
+}));
+document.getElementById('defaults').addEventListener('click', () =>
+  openDlg('Default thresholds', 'Used by every machine that has no values of its own', DEF, 'Machines with their own values are not affected.', false));
+['dlg-cancel', 'dlg-save', 'dlg-reset'].forEach(id => document.getElementById(id).addEventListener('click', () => back.classList.remove('open')));
+back.addEventListener('mousedown', e => { if (e.target === back) back.classList.remove('open'); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') back.classList.remove('open'); });
+
+document.querySelectorAll('.seg button').forEach(b => b.addEventListener('click', () => {
+  document.documentElement.dataset.theme = b.dataset.t;
+  document.querySelectorAll('.seg button').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+}));
+</script>
+</body>
+</html>

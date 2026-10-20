@@ -163,8 +163,11 @@ alerts stop evaluating while silenced. Grafana has **no Prometheus of its own**:
   Machine DOWN = registered without an `up == 1` sample in the last minute, pending 4m; Fleet Overview shows a red DOWN
   card with a **Retire** button (deletes the machine row and its own thresholds; a machine that sends again is
   re-registered). Both read `machine_registered` over `[1m]` so a retire shows within a minute.
-  Usage cards (CPU / Memory / Disk) show a value only while the machine is UP; otherwise they say "No data" (CPU, a
-  rate, would otherwise vanish while Memory / Disk keep the last sample for 5 minutes).
+  One card per machine (name, project chip, UP / DOWN, three usage rows; mock-up `docs/preview/fleet-card.html`). The panel
+  gets one row per machine and kind (status, cpu, memory, disk, plus cores / mem_used / mem_total / disk_used / disk_total
+  for the amounts under the bars) and its script folds them into cards. A usage row shows a value only while the machine
+  is UP; otherwise it says "No data" (CPU, a rate, would otherwise vanish while Memory / Disk keep the last sample for 5
+  minutes).
   Node Exporter Details' Availability row uses the same DOWN (the stock panels assume the pull model, where a dead
   machine still produces `up = 0`; with push they show UP / 100 % / 0 s while the machine is silent): Status = the
   instant inventory query; availability = successful `up` samples ÷ `machine_registered` samples over the range (both
