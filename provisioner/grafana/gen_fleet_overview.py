@@ -129,7 +129,7 @@ SERVICE_Q = f'({SVC_LIVE} + 0) or {SVC_SILENT}'
 CSS = """
 .toolbar{display:flex;justify-content:flex-end;padding:0 2px 8px}
 .cards{--ok:#1f9d55;--warn:#ed8129;--crit:#d93636;--accent:#5794f2;--line:rgba(128,128,128,.35);
-  display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;padding:2px}
+  display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;align-items:start;padding:2px}
 .card{position:relative;display:flex;flex-direction:column;gap:10px;padding:12px 14px 14px;min-width:0;
   border:1px solid var(--line);border-left:5px solid var(--ok);border-radius:8px;background:rgba(128,128,128,.10);color:inherit}
 .card:hover{background:rgba(128,128,128,.18);border-top-color:var(--accent);border-right-color:var(--accent);border-bottom-color:var(--accent)}
@@ -159,7 +159,7 @@ CSS = """
 .chip[data-k="warn"],.chip[data-k="crit"],.chip[data-k="is_default"],.chip[data-k="resource"],.chip[data-k="__name__"],
 .chip[data-k="name"],.chip[data-k="host_name"],.chip[data-k="nodata"],.chip[data-k="otel_scope_name"],.chip[data-k="otel_scope_version"]{display:none}
 .metrics{display:flex;flex-direction:column;gap:10px}
-.row{position:relative;z-index:2;display:grid;grid-template-columns:58px 1fr 54px;grid-template-rows:auto auto;
+.urow{position:relative;z-index:2;display:grid;grid-template-columns:58px 1fr 54px;grid-template-rows:auto auto;
   column-gap:10px;row-gap:3px;align-items:center;cursor:default}
 .lbl{font-size:12px;opacity:.62}
 .bar{position:relative;height:8px;border-radius:4px;background:rgba(128,128,128,.26)}
@@ -168,12 +168,12 @@ CSS = """
 .val{text-align:right;font-weight:600;font-size:15px;font-variant-numeric:tabular-nums}
 .val small{font-size:11px;font-weight:500;opacity:.62;margin-left:1px}
 .amt{grid-column:2 / 4;font-size:11px;opacity:.62;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.row[data-state="warn"] .bar i{background:var(--warn)} .row[data-state="warn"] .val{color:var(--warn)}
-.row[data-state="crit"] .bar i{background:var(--crit)} .row[data-state="crit"] .val{color:var(--crit)}
-.row[data-state="nodata"] .bar{opacity:.45} .row[data-state="nodata"] .val{font-size:12px;font-weight:500;opacity:.62}
+.urow[data-state="warn"] .bar i{background:var(--warn)} .urow[data-state="warn"] .val{color:var(--warn)}
+.urow[data-state="crit"] .bar i{background:var(--crit)} .urow[data-state="crit"] .val{color:var(--crit)}
+.urow[data-state="nodata"] .bar{opacity:.45} .urow[data-state="nodata"] .val{font-size:12px;font-weight:500;opacity:.62}
 .tip{display:none;position:absolute;right:0;bottom:calc(100% + 6px);z-index:5;white-space:nowrap;font-size:12px;
   padding:5px 8px;border-radius:5px;background:rgba(0,0,0,.8);color:#fff;pointer-events:none}
-.row:hover .tip{display:block}
+.urow:hover .tip{display:block}
 .downnote{font-size:12px;color:var(--crit)}
 .raw{display:none}
 .svc .pill{display:none}
@@ -218,7 +218,7 @@ const canEdit = role !== 'Viewer' && role !== 'None';
 // labels: drop empty ones (the table join gives every card every column, e.g. host_name exists on Memory but not on the
 // aggregated CPU / Disk series, target on a service with results but not on a "no data" one); name / host_name (= the
 // card title) and otel_scope_* are hidden by CSS
-el.querySelectorAll('.chip').forEach(c => { if (!c.textContent.slice(c.dataset.k.length + 1).trim()) { c.remove(); } });
+el.querySelectorAll('.chip[data-k]').forEach(c => { if (!c.textContent.slice(c.dataset.k.length + 1).trim()) { c.remove(); } });
 
 async function runSql(sql) {
   const resp = await fetch(base + '/api/ds/query', {
@@ -284,7 +284,7 @@ function cardHtml(m) {
     const tip = v == null ? 'No data: ' + why : LABEL[r] + ' ' + v.toFixed(1) + '%' + thrText;
     const used = r === 'memory' ? m.b.mem_used : m.b.disk_used, total = r === 'memory' ? m.b.mem_total : m.b.disk_total;
     const amt = !m.up ? '—' : r === 'cpu' ? (m.b.cores == null ? '—' : m.b.cores + ' cores') : (used == null || total == null || !(total > 0) ? '—' : amount(used, total));
-    return '<div class="row" data-state="' + s + '"><span class="lbl">' + LABEL[r] + '</span>' +
+    return '<div class="urow" data-state="' + s + '"><span class="lbl">' + LABEL[r] + '</span>' +
       '<div class="bar"><i style="width:' + (v == null ? 0 : v) + '%"></i>' + marks + '</div>' +
       '<span class="val">' + (v == null ? 'No data' : v.toFixed(1) + '<small>%</small>') + '</span><span></span><span class="amt">' + amt + '</span>' +
       '<span class="tip">' + esc(tip) + '</span></div>';
@@ -407,7 +407,8 @@ function openModal(o) {
   }
 }
 
-el.querySelectorAll('button[data-action]').forEach(b => {
+el.querySelectorAll('button[data-action]:not([data-bound])').forEach(b => {
+  b.dataset.bound = '1';
   if (!canEdit) { b.disabled = true; b.title = 'Editing thresholds requires the Editor or Admin role'; return; }
   b.addEventListener('click', async ev => {
     ev.preventDefault(); ev.stopPropagation();
@@ -441,7 +442,8 @@ el.querySelectorAll('button[data-action]').forEach(b => {
 """
 
 SERVICE_AFTER = COMMON_JS + r"""
-el.querySelectorAll('button[data-action="retire"]').forEach(b => {
+el.querySelectorAll('button[data-action="retire"]:not([data-bound])').forEach(b => {
+  b.dataset.bound = '1';
   if (!canEdit) { b.disabled = true; b.title = 'Retiring a service requires the Editor or Admin role'; return; }
   b.addEventListener('click', async ev => {
     ev.preventDefault(); ev.stopPropagation();
